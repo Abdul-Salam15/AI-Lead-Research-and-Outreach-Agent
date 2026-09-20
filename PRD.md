@@ -28,7 +28,7 @@ You are also required to turn the provided guidance docs into Claude Agent SDK s
 
 ## Apify Usage Limits
 
-Apify is a **shared, paid account**. The cohort budget for this week is **$100 across everyone**, which is **$5 per person**. Spend is pooled — if you burn through your share, you are taking it from someone else.
+You will be invited to join the team's Apify account — accept the invite before you start building. Apify is a **shared, paid account**. The cohort budget for this week is **$100 across everyone**, which is **$5 per person**. Spend is pooled — if you burn through your share, you are taking it from someone else.
 
 Treat every run as something that can cost money until you have proved otherwise:
 
