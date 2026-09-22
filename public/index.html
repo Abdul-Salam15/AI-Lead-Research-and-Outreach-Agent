@@ -1,1 +1,35 @@
-<!-- Placeholder — frontend ported from design/Casefile.dc.html in Phase 8. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Casefile</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-header__left">
+    <button type="button" class="app-header__brand" data-nav="intake">
+      <span class="app-header__mark"></span>
+      <span class="app-header__title">Casefile</span>
+    </button>
+    <nav class="app-header__nav">
+      <button type="button" class="app-header__nav-btn" data-nav="intake">New run</button>
+      <button type="button" class="app-header__nav-btn" data-nav="history">Run history</button>
+    </nav>
+  </div>
+  <div class="app-header__notice">
+    <span class="app-header__notice-dot"></span>
+    <span class="app-header__notice-text">Drafts only. Casefile never sends outreach and never finds or validates email addresses.</span>
+  </div>
+</header>
+
+<main id="app"></main>
+
+<script src="/app.js" defer></script>
+</body>
+</html>
