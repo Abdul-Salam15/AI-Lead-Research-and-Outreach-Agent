@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { supabase } from "../lib/supabase";
-import { runAgent } from "../agent/runAgent";
+import { runAgent, stopRun } from "../agent/runAgent";
 
 const router = Router();
 
@@ -90,6 +90,33 @@ router.get("/:id/leads", async (req, res) => {
   }
 
   res.json(data);
+});
+
+router.post("/:id/stop", async (req, res) => {
+  const { data: run, error } = await supabase
+    .from("runs")
+    .select("status")
+    .eq("id", req.params.id)
+    .maybeSingle();
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+  if (!run) {
+    return res.status(404).json({ error: "Run not found" });
+  }
+  if (run.status !== "running") {
+    return res.status(409).json({ error: `Run is not running (status: ${run.status})` });
+  }
+
+  const stopped = await stopRun(req.params.id);
+  if (!stopped) {
+    return res.status(409).json({
+      error: "Run is not actively tracked on this server — it may have already finished, or the server restarted since it started.",
+    });
+  }
+
+  res.json({ ok: true });
 });
 
 router.get("/:id/tool-calls", async (req, res) => {

@@ -94,6 +94,8 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, input:focus-visib
   text-decoration: underline; text-underline-offset: 2px;
 }
 .btn--sm { padding: 8px 15px; font-size: 13.5px; }
+.btn--danger-outline { background: #F3F1EA; color: #8B4B44; border-color: #C9A49E; font-weight: 600; }
+.btn--danger-outline:hover:not(:disabled) { background: #F0E5E3; }
 .btn--icon {
   display: flex; align-items: center; gap: 7px; background: transparent; border: 1px solid transparent;
   border-radius: 3px; padding: 8px 10px; cursor: pointer; color: #21252B; opacity: 0.55;
@@ -155,6 +157,7 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, input:focus-visib
 .badge.status-success { --text: #2C5342; --bg: #DFE8E2; --border: #A9C0B2; }
 .badge.status-error { --text: #6F3B36; --bg: #F0E5E3; --border: #C9A49E; }
 .badge.status-blocked { --text: #6E5518; --bg: #EFE7D2; --border: #D8C89A; }
+.badge.status-stopped { --text: #6E5518; --bg: #EFE7D2; --border: #D8C89A; }
 
 /* ---------------------------------------------------------------------- *
  * Grids

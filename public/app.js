@@ -329,6 +329,14 @@
         </div>
       `;
     }
+    if (run.status === "stopped") {
+      return `
+        <div class="card" style="border-color:#D8C89A; background:#F3EFE6; display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom: 20px;">
+          <span style="font-size: 14px; color:#6E5518;">Run stopped. Whatever was found before stopping is saved below.</span>
+          <button type="button" class="btn btn--primary btn--sm" data-action="view-leads" data-run="${esc(run.id)}">View leads</button>
+        </div>
+      `;
+    }
     return "";
   }
 
@@ -358,7 +366,9 @@
               </div>
               <h1 class="h1" style="font-size: 28px; margin: 0;">${esc(run.objective)}</h1>
             </div>
+            ${run.status === "running" ? `<button type="button" class="btn btn--danger-outline" data-action="stop-run" data-run="${esc(run.id)}">Stop run</button>` : ""}
           </div>
+          <div id="stop-run-error" class="muted" style="color:#6F3B36;font-size:13.5px;margin-bottom:12px;"></div>
           ${runStatusBanner(run)}
           ${icpPanel(run)}
           <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 16px; align-items: start; margin-top: 16px;">
@@ -428,7 +438,7 @@
       return state.leadSort === "conf-asc" ? ca - cb : cb - ca;
     });
 
-    const shortfall = (run.status === "completed" || run.status === "partial") && run.leads_qualified < run.target_qualified_leads;
+    const shortfall = ["completed", "partial", "stopped"].includes(run.status) && run.leads_qualified < run.target_qualified_leads;
 
     return `
       ${shortfall ? `
@@ -833,6 +843,21 @@
     if (action === "start-research") return startResearch();
     if (action === "go-intake") return navigate("#/intake");
     if (action === "view-leads") return navigate(`#/dashboard/${runId}/leads`);
+    if (action === "stop-run") {
+      if (!confirm("Stop this run? Whatever's been found so far stays saved, but research stops here.")) return;
+      el.disabled = true;
+      el.textContent = "Stopping…";
+      const errorEl = document.getElementById("stop-run-error");
+      try {
+        await api(`/api/runs/${runId}/stop`, { method: "POST" });
+      } catch (err) {
+        if (errorEl) errorEl.textContent = `Couldn't stop the run: ${err.message}`;
+        el.disabled = false;
+        el.textContent = "Stop run";
+        return;
+      }
+      return render();
+    }
     if (action === "open-run") return navigate(el.dataset.status === "running" ? `#/run/${runId}` : `#/dashboard/${runId}/leads`);
     if (action === "dash-tab") { state.dashboardTab[runId] = el.dataset.value; return navigate(`#/dashboard/${runId}/${el.dataset.value}`); }
     if (action === "open-lead") { const rid = parseHash().params.runId; return navigate(`#/lead/${rid}/${leadId}`); }
