@@ -48,6 +48,7 @@ export async function runAgent(runId: string) {
     maxScrapes: run.max_scrapes,
     scrapesUsed: 0,
     discoveredDomains: new Set(),
+    discoveryCallsUsed: 0,
   };
 
   const toolServer = buildToolServer(ctx);
@@ -69,6 +70,7 @@ export async function runAgent(runId: string) {
           "mcp__lead-tools__save_lead",
         ],
         maxTurns: run.max_turns,
+        maxBudgetUsd: Number(process.env.MAX_BUDGET_USD ?? 3),
         hooks: buildHooks(runId),
         model: "claude-sonnet-5",
       },
@@ -95,9 +97,24 @@ export async function runAgent(runId: string) {
     }).eq("id", runId).eq("status", "running");
 
   } catch (err: any) {
+    const errorMessage = String(err?.message ?? err);
+
+    // Running out of turns or budget after saving real leads isn't a
+    // failure — it's the same "finished short of target" concept the UI
+    // already surfaces as "partial". Only genuine errors (crashes, auth
+    // failures, network errors) should still read as "failed". Detected by
+    // matching the phrasing actually observed from the SDK/CLI in testing
+    // (e.g. "Reached maximum number of turns (40)"), since there's no
+    // structured error code surfaced through the thrown error itself.
+    const hitAConfiguredLimit = /max.{0,3}(turns|budget)/i.test(errorMessage);
+    const { count: leadCount } = await supabase
+      .from("leads")
+      .select("*", { count: "exact", head: true })
+      .eq("run_id", runId);
+
     await supabase.from("runs").update({
-      status: "failed",
-      error_message: String(err?.message ?? err),
+      status: hitAConfiguredLimit && (leadCount ?? 0) > 0 ? "partial" : "failed",
+      error_message: errorMessage,
       completed_at: new Date().toISOString(),
     }).eq("id", runId).eq("status", "running");
   } finally {

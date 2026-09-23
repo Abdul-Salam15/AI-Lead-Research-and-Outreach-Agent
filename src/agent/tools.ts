@@ -1,8 +1,15 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { supabase } from "../lib/supabase";
-import { discoverCompaniesViaApify } from "../lib/apify";
+import { discoverCompaniesViaApify, updateDiscoveryCalibration } from "../lib/apify";
 import { scrapeUrl } from "../lib/scrape";
+
+// Hard ceiling on the number of discover_companies *calls* per run — each
+// call is a real, separately-billed Apify actor run regardless of how many
+// results it returns, so this bounds worst-case discovery spend on its
+// own, independent of maxCandidates (which can be as low as 2 early in
+// self-calibration — see src/lib/apify.ts).
+const MAX_DISCOVERY_CALLS = 8;
 
 // RunContext is created fresh per run and closed over by every tool below —
 // this is what makes the limits un-overridable by the agent: the tool
@@ -13,6 +20,7 @@ export interface RunContext {
   maxScrapes: number;
   scrapesUsed: number; // mutated in place as the run progresses
   discoveredDomains: Set<string>; // accumulates across every discover_companies call this run
+  discoveryCallsUsed: number; // mutated in place, synchronously, before each Apify call
 }
 
 export function buildToolServer(ctx: RunContext) {
@@ -28,7 +36,17 @@ export function buildToolServer(ctx: RunContext) {
       ),
     },
     async ({ searchQuery }) => {
-      if (ctx.discoveredDomains.size >= ctx.maxCandidates) {
+      // Checked AND incremented synchronously, before the Apify await below —
+      // this is what makes it safe when the agent dispatches several
+      // discover_companies calls in parallel within one turn (confirmed
+      // this happens: 4 real calls landed within 0.8s of each other in
+      // testing). A check based on discoveredDomains.size (which only
+      // updates after the await resolves) let concurrent calls all pass
+      // the check before any of them updated the shared state — that's
+      // the exact bug that let companies_discovered reach 27 against a
+      // cap of 15. Mirrors scrape_website's already-correct scrapesUsed
+      // pattern below.
+      if (ctx.discoveryCallsUsed >= MAX_DISCOVERY_CALLS) {
         return {
           content: [{
             type: "text",
@@ -37,14 +55,20 @@ export function buildToolServer(ctx: RunContext) {
           }],
         };
       }
-      const results = await discoverCompaniesViaApify(searchQuery, ctx.maxCandidates);
-      for (const r of results) {
-        if (r.domain) ctx.discoveredDomains.add(r.domain);
+      ctx.discoveryCallsUsed++;
+
+      const { items, costUsd } = await discoverCompaniesViaApify(searchQuery, ctx.maxCandidates);
+      for (const item of items) {
+        if (item.domain) ctx.discoveredDomains.add(item.domain);
       }
+
+      await updateDiscoveryCalibration(costUsd, items.length);
+
       await supabase.from("runs")
-        .update({ companies_discovered: ctx.discoveredDomains.size })
+        .update({ companies_discovered: Math.min(ctx.discoveredDomains.size, ctx.maxCandidates) })
         .eq("id", ctx.runId);
-      return { content: [{ type: "text", text: JSON.stringify(results) }] };
+
+      return { content: [{ type: "text", text: JSON.stringify(items) }] };
     }
   );
 
@@ -125,7 +149,7 @@ export function buildToolServer(ctx: RunContext) {
       }).optional(),
     },
     async (lead) => {
-      const { error } = await supabase.from("leads").insert({
+      const payload = {
         run_id: ctx.runId,
         company_name: lead.company_name,
         company_domain: lead.company_domain,
@@ -136,14 +160,46 @@ export function buildToolServer(ctx: RunContext) {
         source_urls: lead.source_urls,
         source_summary: lead.source_summary,
         outreach: lead.outreach ?? {},
-      });
+        updated_at: new Date().toISOString(),
+      };
+
+      // The agent naturally calls save_lead twice for a qualified company —
+      // once right after qualifying (no outreach yet), again after drafting
+      // it — since the system prompt says "call save_lead for every company
+      // you evaluate" without saying "once". Merge into the same row by
+      // company_domain instead of inserting a duplicate. Only when a real
+      // domain exists: a handful of real leads have no domain at all (Apify
+      // found no website), and those are genuinely different companies
+      // that happen to share an empty string, not duplicates of each other.
+      let existingId: string | null = null;
+      if (lead.company_domain) {
+        const { data: existing } = await supabase
+          .from("leads")
+          .select("id")
+          .eq("run_id", ctx.runId)
+          .eq("company_domain", lead.company_domain)
+          .maybeSingle();
+        existingId = existing?.id ?? null;
+      }
+
+      const { error } = existingId
+        ? await supabase.from("leads").update(payload).eq("id", existingId)
+        : await supabase.from("leads").insert(payload);
+
       if (error) {
         return { content: [{ type: "text", text: `Failed to save: ${error.message}` }], isError: true };
       }
-      if (lead.qualification_status === "qualified") {
-        const { data } = await supabase.from("runs").select("leads_qualified").eq("id", ctx.runId).single();
-        await supabase.from("runs").update({ leads_qualified: (data?.leads_qualified ?? 0) + 1 }).eq("id", ctx.runId);
-      }
+
+      // Recomputed from the actual rows rather than incremented, so a
+      // merge-into-existing-row above (or any other edit) can never leave
+      // this counter drifted from what's really in the leads table.
+      const { count } = await supabase
+        .from("leads")
+        .select("*", { count: "exact", head: true })
+        .eq("run_id", ctx.runId)
+        .eq("qualification_status", "qualified");
+      await supabase.from("runs").update({ leads_qualified: count ?? 0 }).eq("id", ctx.runId);
+
       return { content: [{ type: "text", text: "Lead saved." }] };
     }
   );

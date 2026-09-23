@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { supabase } from "../lib/supabase";
 import { runAgent, stopRun } from "../agent/runAgent";
+import { getCurrentMaxCandidates } from "../lib/apify";
 
 const router = Router();
 
@@ -11,11 +12,16 @@ router.post("/", async (req, res) => {
     return res.status(400).json({ error: "objective is required" });
   }
 
+  // max_candidates defaults from the self-calibrating discovery_calibration
+  // table (see src/lib/apify.ts) rather than a static env var — an explicit
+  // maxCandidates in the request body still overrides it.
+  const resolvedMaxCandidates = maxCandidates ?? await getCurrentMaxCandidates();
+
   const { data: run, error } = await supabase
     .from("runs")
     .insert({
       objective,
-      max_candidates: maxCandidates ?? Number(process.env.MAX_CANDIDATES ?? 15),
+      max_candidates: resolvedMaxCandidates,
       max_scrapes: maxScrapes ?? Number(process.env.MAX_SCRAPES ?? 20),
       max_turns: Number(process.env.MAX_TURNS ?? 40),
       target_qualified_leads: targetQualifiedLeads ?? Number(process.env.TARGET_QUALIFIED_LEADS ?? 10),
