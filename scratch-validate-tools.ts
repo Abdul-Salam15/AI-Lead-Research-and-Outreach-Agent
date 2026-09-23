@@ -45,7 +45,8 @@ async function main() {
 
   const ctx: RunContext = {
     runId: run.id,
-    maxCandidates: 2,
+    maxCandidates: 6,
+    perCallCandidateLimit: 2,
     maxScrapes: 2,
     scrapesUsed: 0,
     discoveredDomains: new Set(),

@@ -7,8 +7,8 @@ import { scrapeUrl } from "../lib/scrape";
 // Hard ceiling on the number of discover_companies *calls* per run — each
 // call is a real, separately-billed Apify actor run regardless of how many
 // results it returns, so this bounds worst-case discovery spend on its
-// own, independent of maxCandidates (which can be as low as 2 early in
-// self-calibration — see src/lib/apify.ts).
+// own, independent of perCallCandidateLimit (which can be as low as 1
+// early in self-calibration — see src/lib/apify.ts).
 const MAX_DISCOVERY_CALLS = 8;
 
 // RunContext is created fresh per run and closed over by every tool below —
@@ -16,7 +16,19 @@ const MAX_DISCOVERY_CALLS = 8;
 // schemas below never expose a "limit" field the model could set.
 export interface RunContext {
   runId: string;
+  // Run-wide candidate target — how many distinct companies this run
+  // should aim to accumulate in total, across every discover_companies
+  // call. This is what companies_discovered is measured against (the "Y"
+  // in "X / Y" on the run view) and comes from run.max_candidates.
   maxCandidates: number;
+  // The self-calibrated PER-CALL Apify request size — deliberately a much
+  // smaller, separate number (see src/lib/apify.ts) that only controls how
+  // many results a single Apify actor run is asked for, for cost control.
+  // Conflating this with maxCandidates was a real bug: once calibration
+  // started as low as 1, the run-wide target collapsed to 1 too, even
+  // though up to MAX_DISCOVERY_CALLS separate calls could have
+  // accumulated far more.
+  perCallCandidateLimit: number;
   maxScrapes: number;
   scrapesUsed: number; // mutated in place as the run progresses
   discoveredDomains: Set<string>; // accumulates across every discover_companies call this run
@@ -55,9 +67,22 @@ export function buildToolServer(ctx: RunContext) {
           }],
         };
       }
+      // Best-effort only (discoveredDomains updates after the await below,
+      // so this has the same race window discoveryCallsUsed doesn't) — an
+      // efficiency check, not a cost-safety one. discoveryCallsUsed above
+      // is what actually bounds worst-case spend.
+      if (ctx.discoveredDomains.size >= ctx.maxCandidates) {
+        return {
+          content: [{
+            type: "text",
+            text: "DISCOVERY LIMIT REACHED for this run. Do not search for " +
+                  "more companies — qualify using the candidates already found.",
+          }],
+        };
+      }
       ctx.discoveryCallsUsed++;
 
-      const { items, costUsd } = await discoverCompaniesViaApify(searchQuery, ctx.maxCandidates);
+      const { items, costUsd } = await discoverCompaniesViaApify(searchQuery, ctx.perCallCandidateLimit);
       for (const item of items) {
         if (item.domain) ctx.discoveredDomains.add(item.domain);
       }

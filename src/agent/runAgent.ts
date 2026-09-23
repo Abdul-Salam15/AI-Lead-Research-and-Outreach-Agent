@@ -3,6 +3,7 @@ import { supabase } from "../lib/supabase";
 import { buildToolServer, RunContext } from "./tools";
 import { buildHooks } from "./hooks";
 import { buildSystemPrompt } from "./systemPrompt";
+import { getCurrentMaxCandidates } from "../lib/apify";
 
 // Runs currently in flight on this server process, keyed by run id — the
 // only way a separate HTTP request (POST /api/runs/:id/stop) can reach the
@@ -42,9 +43,16 @@ export async function runAgent(runId: string) {
   const { data: run } = await supabase.from("runs").select("*").eq("id", runId).single();
   if (!run) throw new Error("Run not found");
 
+  // Fetched once, held fixed for the whole run, so a run's behavior stays
+  // predictable even if calibration updates mid-run from its own earlier
+  // calls — the ramp-up applies to the *next* run, not retroactively to
+  // this one.
+  const perCallCandidateLimit = await getCurrentMaxCandidates();
+
   const ctx: RunContext = {
     runId,
-    maxCandidates: run.max_candidates,
+    maxCandidates: run.max_candidates, // run-wide candidate target
+    perCallCandidateLimit,             // self-calibrated per-call Apify request size
     maxScrapes: run.max_scrapes,
     scrapesUsed: 0,
     discoveredDomains: new Set(),

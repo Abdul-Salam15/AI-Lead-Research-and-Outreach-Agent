@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { supabase } from "../lib/supabase";
 import { runAgent, stopRun } from "../agent/runAgent";
-import { getCurrentMaxCandidates } from "../lib/apify";
 
 const router = Router();
 
@@ -12,10 +11,14 @@ router.post("/", async (req, res) => {
     return res.status(400).json({ error: "objective is required" });
   }
 
-  // max_candidates defaults from the self-calibrating discovery_calibration
-  // table (see src/lib/apify.ts) rather than a static env var — an explicit
-  // maxCandidates in the request body still overrides it.
-  const resolvedMaxCandidates = maxCandidates ?? await getCurrentMaxCandidates();
+  const resolvedTargetQualifiedLeads = targetQualifiedLeads ?? Number(process.env.TARGET_QUALIFIED_LEADS ?? 10);
+
+  // max_candidates is the run-wide candidate target — how many distinct
+  // companies this run should aim to accumulate in total (not the per-call
+  // Apify request size, which is separately self-calibrated — see
+  // src/agent/runAgent.ts / src/lib/apify.ts). Appendix A: "MAX_CANDIDATES
+  // should be meaningfully higher than TARGET_QUALIFIED_LEADS" — 3x here.
+  const resolvedMaxCandidates = maxCandidates ?? resolvedTargetQualifiedLeads * 3;
 
   const { data: run, error } = await supabase
     .from("runs")
@@ -24,7 +27,7 @@ router.post("/", async (req, res) => {
       max_candidates: resolvedMaxCandidates,
       max_scrapes: maxScrapes ?? Number(process.env.MAX_SCRAPES ?? 20),
       max_turns: Number(process.env.MAX_TURNS ?? 40),
-      target_qualified_leads: targetQualifiedLeads ?? Number(process.env.TARGET_QUALIFIED_LEADS ?? 10),
+      target_qualified_leads: resolvedTargetQualifiedLeads,
     })
     .select()
     .single();

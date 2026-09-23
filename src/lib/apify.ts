@@ -63,9 +63,14 @@ const KEEP_FIELDS = [
 ] as const;
 
 function domainFromWebsite(website: unknown): string {
-  if (typeof website !== "string" || !website) return "";
+  if (typeof website !== "string" || !website.trim()) return "";
+  // new URL() throws on a bare hostname with no scheme (e.g. "www.foo.com"
+  // instead of "https://www.foo.com") — a real, observed shape from this
+  // actor — which silently produced an empty domain for a company that
+  // really was found, undercounting companies_discovered.
+  const withScheme = /^https?:\/\//i.test(website) ? website : `https://${website}`;
   try {
-    return new URL(website).hostname.replace(/^www\./, "");
+    return new URL(withScheme).hostname.replace(/^www\./, "");
   } catch {
     return "";
   }
