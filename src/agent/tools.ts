@@ -12,6 +12,7 @@ export interface RunContext {
   maxCandidates: number;
   maxScrapes: number;
   scrapesUsed: number; // mutated in place as the run progresses
+  discoveredDomains: Set<string>; // accumulates across every discover_companies call this run
 }
 
 export function buildToolServer(ctx: RunContext) {
@@ -27,9 +28,21 @@ export function buildToolServer(ctx: RunContext) {
       ),
     },
     async ({ searchQuery }) => {
+      if (ctx.discoveredDomains.size >= ctx.maxCandidates) {
+        return {
+          content: [{
+            type: "text",
+            text: "DISCOVERY LIMIT REACHED for this run. Do not search for " +
+                  "more companies — qualify using the candidates already found.",
+          }],
+        };
+      }
       const results = await discoverCompaniesViaApify(searchQuery, ctx.maxCandidates);
+      for (const r of results) {
+        if (r.domain) ctx.discoveredDomains.add(r.domain);
+      }
       await supabase.from("runs")
-        .update({ companies_discovered: results.length })
+        .update({ companies_discovered: ctx.discoveredDomains.size })
         .eq("id", ctx.runId);
       return { content: [{ type: "text", text: JSON.stringify(results) }] };
     }
