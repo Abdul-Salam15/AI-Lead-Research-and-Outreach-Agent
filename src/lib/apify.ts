@@ -5,7 +5,17 @@ const APIFY_TOKEN = process.env.APIFY_TOKEN!;
 const APIFY_ACTOR_ID = process.env.APIFY_ACTOR_ID!;
 const MAX_DISCOVERY_BUDGET_USD = Number(process.env.MAX_DISCOVERY_BUDGET_USD ?? 1);
 const SAFETY_MARGIN = 2; // Appendix A's own "− safety margin" in the sizing formula
-const BOOTSTRAP_MAX_CANDIDATES = 2; // Appendix A's own "test at MAX_CANDIDATES = 2 first"
+// The calibration STATE (discovery_calibration.current_max_candidates)
+// genuinely starts at 0 — "nothing learned yet" — and is displayed that
+// way. But an actual run can never use 0 as its real per-call limit: this
+// code does items.slice(0, limit), so limit=0 always returns zero results,
+// and zero results means updateDiscoveryCalibration has nothing to learn
+// from (it early-returns on resultCount <= 0) — a permanent deadlock, never
+// able to bootstrap itself. 1 is the smallest number that lets the system
+// ever get real data at all, so it's applied only as an operational floor
+// when a run actually needs a working number, never as the calibration
+// state's own starting value.
+const MIN_OPERATIONAL_CANDIDATES = 1;
 // Appendix A's own practical ceiling ("a reasonable starting point... is
 // somewhere in the 15-25 range") — capped regardless of how cheap the
 // actor turns out to be. Budget affording more candidates doesn't mean
@@ -163,9 +173,14 @@ export async function updateDiscoveryCalibration(costUsd: number, resultCount: n
   const pricePerResult = totalCost / totalResults;
   const desired = Math.min(
     PRACTICAL_MAX_CANDIDATES_CEILING,
-    Math.max(BOOTSTRAP_MAX_CANDIDATES, Math.floor(MAX_DISCOVERY_BUDGET_USD / pricePerResult) - SAFETY_MARGIN)
+    Math.max(MIN_OPERATIONAL_CANDIDATES, Math.floor(MAX_DISCOVERY_BUDGET_USD / pricePerResult) - SAFETY_MARGIN)
   );
-  const nextMax = Math.max(BOOTSTRAP_MAX_CANDIDATES, Math.min(desired, row.current_max_candidates * 2));
+  // Math.max(MIN_OPERATIONAL_CANDIDATES, row.current_max_candidates) here is
+  // purely to escape the 0 * 2 = 0 deadlock on the very first calibration
+  // update ever (when the stored value is still genuinely 0) — it doesn't
+  // stop the STORED value from having started at 0, only from being stuck
+  // there once real data exists to learn from.
+  const nextMax = Math.min(desired, Math.max(MIN_OPERATIONAL_CANDIDATES, row.current_max_candidates) * 2);
 
   const { error: writeError } = await supabase
     .from("discovery_calibration")
@@ -182,8 +197,12 @@ export async function updateDiscoveryCalibration(costUsd: number, resultCount: n
   }
 }
 
-// Bootstraps to 2 (Appendix A's own "test small first") if the calibration
-// table doesn't exist yet or has no row — e.g. migration 0003 not yet run.
+// The calibration state itself may genuinely be 0 (nothing learned yet, or
+// the table/row doesn't exist because migration 0003 hasn't run) — but a
+// real run always gets at least MIN_OPERATIONAL_CANDIDATES, since a run
+// literally cannot discover anything with a 0 cap. This is the one place
+// that floor gets applied; the stored calibration value is never mutated
+// to enforce it.
 export async function getCurrentMaxCandidates(): Promise<number> {
   const { data, error } = await supabase
     .from("discovery_calibration")
@@ -191,6 +210,6 @@ export async function getCurrentMaxCandidates(): Promise<number> {
     .eq("id", 1)
     .single();
 
-  if (error || !data) return BOOTSTRAP_MAX_CANDIDATES;
-  return data.current_max_candidates;
+  const raw = error || !data ? 0 : data.current_max_candidates;
+  return Math.max(MIN_OPERATIONAL_CANDIDATES, raw);
 }
