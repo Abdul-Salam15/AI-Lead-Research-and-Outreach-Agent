@@ -109,7 +109,7 @@
     outreachUi: {}, // `${leadId}:${item}` -> { mode, draft, guidance, proposed, errorMessage }
     regenState: {}, // leadId -> { remaining, resetAt }
     dashboardTab: {}, // runId -> 'leads' | 'audit'
-    leadFilter: "all",
+    leadFilter: "top",
     leadSort: "conf-desc",
     auditToolFilter: "all",
     auditStatusFilter: "all",
@@ -427,16 +427,40 @@
       `;
     }
 
+    const byConfDesc = (a, b) => (b.confidence ?? 0) - (a.confidence ?? 0);
+
     const counts = { all: leads.length, qualified: 0, needs_review: 0, not_qualified: 0 };
     leads.forEach((l) => { counts[l.qualification_status] = (counts[l.qualification_status] || 0) + 1; });
-    const filterDefs = [["all", "All"], ["qualified", "Qualified"], ["needs_review", "Needs review"], ["not_qualified", "Not qualified"]];
 
-    let list = state.leadFilter === "all" ? leads : leads.filter((l) => l.qualification_status === state.leadFilter);
-    list = list.slice().sort((a, b) => {
-      if (state.leadSort === "name") return a.company_name.localeCompare(b.company_name);
-      const ca = a.confidence ?? 0, cb = b.confidence ?? 0;
-      return state.leadSort === "conf-asc" ? ca - cb : cb - ca;
-    });
+    const target = run.target_qualified_leads;
+    const filterDefs = [
+      ["top", `Top ${target}`],
+      ["all", "All"],
+      ["qualified", "Qualified"],
+      ["needs_review", "Needs review"],
+      ["not_qualified", "Not qualified"],
+    ];
+
+    let list;
+    if (state.leadFilter === "top") {
+      // Qualified leads always take priority slots (ranked by confidence
+      // among themselves); if fewer than `target` are qualified, the
+      // remaining slots fill with the highest-scoring needs_review, then
+      // not_qualified. A not_qualified company's "confidence" measures
+      // confidence in disqualifying it, not fit, so it only ever fills a
+      // leftover slot, never displaces a qualified lead.
+      const qualified = leads.filter((l) => l.qualification_status === "qualified").sort(byConfDesc);
+      const review = leads.filter((l) => l.qualification_status === "needs_review").sort(byConfDesc);
+      const notQualified = leads.filter((l) => l.qualification_status === "not_qualified").sort(byConfDesc);
+      list = [...qualified, ...review, ...notQualified].slice(0, target);
+    } else {
+      list = state.leadFilter === "all" ? leads : leads.filter((l) => l.qualification_status === state.leadFilter);
+      list = list.slice().sort((a, b) => {
+        if (state.leadSort === "name") return a.company_name.localeCompare(b.company_name);
+        const ca = a.confidence ?? 0, cb = b.confidence ?? 0;
+        return state.leadSort === "conf-asc" ? ca - cb : cb - ca;
+      });
+    }
 
     const shortfall = ["completed", "partial", "stopped"].includes(run.status) && run.leads_qualified < run.target_qualified_leads;
 
@@ -452,17 +476,19 @@
       <div class="filters-row">
         <div class="filter-chips">
           ${filterDefs.map(([key, label]) => `
-            <button type="button" class="filter-chip ${state.leadFilter === key ? "is-active" : ""}" data-action="set-lead-filter" data-value="${key}">${label} ${counts[key] || 0}</button>
+            <button type="button" class="filter-chip ${state.leadFilter === key ? "is-active" : ""}" data-action="set-lead-filter" data-value="${key}">${label}${key === "top" ? "" : " " + (counts[key] || 0)}</button>
           `).join("")}
         </div>
-        <div class="sort-row">
-          <label for="sortpick">Sort</label>
-          <select id="sortpick" class="select" data-action="set-lead-sort">
-            <option value="conf-desc" ${state.leadSort === "conf-desc" ? "selected" : ""}>Confidence, high to low</option>
-            <option value="conf-asc" ${state.leadSort === "conf-asc" ? "selected" : ""}>Confidence, low to high</option>
-            <option value="name" ${state.leadSort === "name" ? "selected" : ""}>Company name</option>
-          </select>
-        </div>
+        ${state.leadFilter !== "top" ? `
+          <div class="sort-row">
+            <label for="sortpick">Sort</label>
+            <select id="sortpick" class="select" data-action="set-lead-sort">
+              <option value="conf-desc" ${state.leadSort === "conf-desc" ? "selected" : ""}>Confidence, high to low</option>
+              <option value="conf-asc" ${state.leadSort === "conf-asc" ? "selected" : ""}>Confidence, low to high</option>
+              <option value="name" ${state.leadSort === "name" ? "selected" : ""}>Company name</option>
+            </select>
+          </div>
+        ` : `<span class="muted" style="font-size:12.5px;">Ranked: qualified first, then highest-confidence review/not-qualified fill any remaining slots.</span>`}
       </div>
       <div class="leads-grid">${list.map(leadCard).join("")}</div>
     `;
