@@ -1,0 +1,60 @@
+# Render Blueprint — one web service, matching implementation.md Phase 9
+# ("Railway or Render, not Vercel/Netlify": the Agent SDK spawns a
+# persistent subprocess, which needs a real long-running process, not a
+# serverless function). No separate build step — tsx runs src/server.ts
+# directly at runtime (see package.json's "start" script), avoiding this
+# project's known tsc/verbatimModuleSyntax config mismatch entirely.
+#
+# Using this file: Render dashboard -> New -> Blueprint -> pick this repo.
+# Every env var below marked `sync: false` must be entered manually in the
+# Render dashboard after the service is created — never commit real
+# secrets into this file.
+services:
+  - type: web
+    name: casefile
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # PORT is injected by Render automatically — do not set it here;
+      # src/server.ts already reads process.env.PORT.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: APIFY_TOKEN
+        sync: false
+      - key: APIFY_ACTOR_ID
+        sync: false
+      - key: FIRECRAWL_API_KEY
+        sync: false
+      - key: GMAIL_USER
+        sync: false
+      - key: GMAIL_APP_PASSWORD
+        sync: false
+      # Set this to the real https://<service-name>.onrender.com URL once
+      # Render assigns it — used to build the run-complete email's link
+      # and (client-side) the password-reset redirect origin.
+      - key: APP_BASE_URL
+        sync: false
+      - key: MAX_SCRAPES
+        value: "20"
+      - key: MAX_TURNS
+        value: "40"
+      - key: MAX_BUDGET_USD
+        value: "3"
+      - key: MAX_DISCOVERY_BUDGET_USD
+        value: "1"
+      - key: TARGET_QUALIFIED_LEADS
+        value: "10"
+      - key: REGENERATE_LIMIT
+        value: "3"
+      - key: REGENERATE_WINDOW_MINUTES
+        value: "30"
