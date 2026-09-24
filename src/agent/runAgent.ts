@@ -65,7 +65,7 @@ export async function runAgent(runId: string) {
     const stream = query({
       prompt: `Qualification objective: ${run.objective}\n\nTarget qualified leads: ${run.target_qualified_leads}`,
       options: {
-        systemPrompt: buildSystemPrompt(run.target_qualified_leads),
+        systemPrompt: buildSystemPrompt(run.target_qualified_leads, run.max_candidates, run.max_scrapes),
         cwd: process.cwd(),
         settingSources: ["project"],       // discovers .claude/skills/ at project root
         skills: "all",

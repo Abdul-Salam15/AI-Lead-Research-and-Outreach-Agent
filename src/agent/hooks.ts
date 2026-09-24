@@ -15,12 +15,27 @@ export function buildHooks(runId: string) {
         hooks: [
           async (input: any) => {
             if (!ALLOWED_TOOLS.has(input.tool_name)) {
+              const reason = `${input.tool_name} is outside this project's allowed tool set.`;
+              // A denied call never reaches PostToolUse (the SDK stops it
+              // before execution), so without this it would never appear
+              // in the audit log at all — leaving the schema's own
+              // 'blocked' status (migration 0001) permanently unused and
+              // silently failing Phase 4's goal of auditing every tool
+              // call "regardless of which specific tool ran."
+              await supabase.from("tool_calls").insert({
+                run_id: runId,
+                tool_name: input.tool_name,
+                purpose: describePurpose(input.tool_name),
+                input_summary: safeSlice(input.tool_input),
+                result_summary: null,
+                status: "blocked",
+                error_message: reason,
+              });
               return {
                 hookSpecificOutput: {
                   hookEventName: "PreToolUse",
                   permissionDecision: "deny",
-                  permissionDecisionReason:
-                    `${input.tool_name} is outside this project's allowed tool set.`,
+                  permissionDecisionReason: reason,
                 },
               };
             }

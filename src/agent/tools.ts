@@ -4,12 +4,25 @@ import { supabase } from "../lib/supabase";
 import { discoverCompaniesViaApify, updateDiscoveryCalibration } from "../lib/apify";
 import { scrapeUrl } from "../lib/scrape";
 
-// Hard ceiling on the number of discover_companies *calls* per run — each
-// call is a real, separately-billed Apify actor run regardless of how many
-// results it returns, so this bounds worst-case discovery spend on its
-// own, independent of perCallCandidateLimit (which can be as low as 1
-// early in self-calibration — see src/lib/apify.ts).
-const MAX_DISCOVERY_CALLS = 8;
+// Ceiling on the number of discover_companies *calls* per run — each call
+// is a real, separately-billed Apify actor run regardless of how many
+// results it returns, so this bounds worst-case discovery spend
+// independent of perCallCandidateLimit (which can be as low as 1 early in
+// self-calibration — see src/lib/apify.ts). A flat 8 used to be applied
+// no matter how small perCallCandidateLimit was: right after a calibration
+// reset (limit=1), 8 calls could only ever surface 8 companies, stranding
+// runs far short of maxCandidates (e.g. 8/30) before qualification even
+// started. Scaling the call ceiling to how many calls it actually takes to
+// reach maxCandidates at the current per-call size fixes that, while
+// ABSOLUTE_MAX_DISCOVERY_CALLS still bounds worst-case spend if
+// maxCandidates is large and perCallCandidateLimit is tiny.
+const MIN_DISCOVERY_CALLS = 8;
+const ABSOLUTE_MAX_DISCOVERY_CALLS = 40;
+
+function computeMaxDiscoveryCalls(maxCandidates: number, perCallCandidateLimit: number): number {
+  const callsNeeded = Math.ceil(maxCandidates / Math.max(1, perCallCandidateLimit));
+  return Math.min(ABSOLUTE_MAX_DISCOVERY_CALLS, Math.max(MIN_DISCOVERY_CALLS, callsNeeded));
+}
 
 // RunContext is created fresh per run and closed over by every tool below —
 // this is what makes the limits un-overridable by the agent: the tool
@@ -26,8 +39,8 @@ export interface RunContext {
   // many results a single Apify actor run is asked for, for cost control.
   // Conflating this with maxCandidates was a real bug: once calibration
   // started as low as 1, the run-wide target collapsed to 1 too, even
-  // though up to MAX_DISCOVERY_CALLS separate calls could have
-  // accumulated far more.
+  // though up to computeMaxDiscoveryCalls()'s many separate calls could
+  // have accumulated far more.
   perCallCandidateLimit: number;
   maxScrapes: number;
   scrapesUsed: number; // mutated in place as the run progresses
@@ -36,18 +49,48 @@ export interface RunContext {
 }
 
 export function buildToolServer(ctx: RunContext) {
+  // Computed once per run from this run's own maxCandidates and its frozen
+  // perCallCandidateLimit (see runAgent.ts) — never re-derived mid-run, so
+  // it stays consistent with the discoveryCallsUsed counter it's compared
+  // against below.
+  const maxDiscoveryCalls = computeMaxDiscoveryCalls(ctx.maxCandidates, ctx.perCallCandidateLimit);
+
+  const COMPANY_SIZE_BANDS = [
+    "1-10", "11-50", "51-200", "201-500", "501-1000", "1001-5000", "5001-10000", "10001+",
+  ] as const;
+
   const discover_companies = tool(
     "discover_companies",
-    "Search for candidate companies matching a description. The number of " +
-    "results returned is fixed by this run's configuration and cannot be " +
-    "changed by the caller.",
+    "Search for candidate companies on LinkedIn. The number of results " +
+    "returned is fixed by this run's configuration and cannot be changed " +
+    "by the caller.",
     {
-      searchQuery: z.string().describe(
-        "Natural-language description of the target company, e.g. " +
-        "'B2B SaaS companies, 10-100 employees, United States'"
+      searchQuery: z.string().min(3).describe(
+        "Keyword(s) for the company's product, industry, or niche ONLY — " +
+        "e.g. 'B2B SaaS', 'fintech software platform', 'HR technology'. " +
+        "This is matched literally against LinkedIn's own company search " +
+        "(like typing into LinkedIn's search bar), NOT a natural-language " +
+        "sentence — it does not understand geography, employee count, or " +
+        "combined multi-part descriptions, and a query with too many " +
+        "literal terms will match nothing. Put geography in `locations` " +
+        "and headcount in `companySize` below instead of adding them here. " +
+        "Never use an empty string or a single generic/placeholder word " +
+        "(e.g. 'test') — LinkedIn will literally substring-match it against " +
+        "company names and return irrelevant results."
+      ),
+      locations: z.array(z.string()).max(20).optional().describe(
+        "LinkedIn location names to filter by, e.g. ['Nigeria']. Always " +
+        "set this from the ICP's geography instead of naming a country in " +
+        "searchQuery."
+      ),
+      companySize: z.array(z.enum(COMPANY_SIZE_BANDS)).optional().describe(
+        "LinkedIn company-size bands to filter by. Include every band " +
+        "that overlaps the ICP's headcount range — e.g. a 10-100 employee " +
+        "target should pass ['11-50', '51-200']. Always set this instead " +
+        "of naming an employee count in searchQuery."
       ),
     },
-    async ({ searchQuery }) => {
+    async ({ searchQuery, locations, companySize }) => {
       // Checked AND incremented synchronously, before the Apify await below —
       // this is what makes it safe when the agent dispatches several
       // discover_companies calls in parallel within one turn (confirmed
@@ -58,7 +101,7 @@ export function buildToolServer(ctx: RunContext) {
       // the exact bug that let companies_discovered reach 27 against a
       // cap of 15. Mirrors scrape_website's already-correct scrapesUsed
       // pattern below.
-      if (ctx.discoveryCallsUsed >= MAX_DISCOVERY_CALLS) {
+      if (ctx.discoveryCallsUsed >= maxDiscoveryCalls) {
         return {
           content: [{
             type: "text",
@@ -82,7 +125,12 @@ export function buildToolServer(ctx: RunContext) {
       }
       ctx.discoveryCallsUsed++;
 
-      const { items, costUsd } = await discoverCompaniesViaApify(searchQuery, ctx.perCallCandidateLimit);
+      const { items, costUsd } = await discoverCompaniesViaApify(
+        searchQuery,
+        ctx.perCallCandidateLimit,
+        locations,
+        companySize
+      );
       for (const item of items) {
         if (item.domain) ctx.discoveredDomains.add(item.domain);
       }
@@ -174,6 +222,33 @@ export function buildToolServer(ctx: RunContext) {
       }).optional(),
     },
     async (lead) => {
+      // outreach is schema-optional (a not_qualified/needs_review company
+      // has none), but the PRD's own deliverable requires every QUALIFIED
+      // lead to carry a full 3-step email sequence and a LinkedIn message —
+      // nothing upstream enforced that, so a qualified company could
+      // silently save with only a LinkedIn message and no emails at all
+      // (observed: Curacel saved qualified with outreach = {
+      // linkedin_message } only, no emails array). Reject instead of
+      // silently accepting an incomplete qualified lead, so the agent is
+      // forced back through the outbound-copywriting skill.
+      if (lead.qualification_status === "qualified") {
+        const emails = lead.outreach?.emails;
+        const linkedin = lead.outreach?.linkedin_message;
+        if (!emails || emails.length !== 3 || !linkedin) {
+          return {
+            content: [{
+              type: "text",
+              text: "REJECTED: a qualified lead must include outreach.emails " +
+                    "(exactly 3 steps: subject, body, personalization_note " +
+                    "each) AND outreach.linkedin_message. Use the " +
+                    "outbound-copywriting skill to draft the full sequence, " +
+                    "then call save_lead again with the complete outreach object.",
+            }],
+            isError: true,
+          };
+        }
+      }
+
       const payload = {
         run_id: ctx.runId,
         company_name: lead.company_name,

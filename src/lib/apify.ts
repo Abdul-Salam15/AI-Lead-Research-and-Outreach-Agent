@@ -123,12 +123,29 @@ async function pollRunUntilFinished(runId: string): Promise<any> {
 // the actor's input schema uses a different field for it.
 export async function discoverCompaniesViaApify(
   searchQuery: string,
-  limit: number
+  limit: number,
+  locations?: string[],
+  companySize?: string[]
 ): Promise<DiscoveryResult> {
+  // The configured actor (harvestapi/linkedin-company-search) does literal
+  // LinkedIn keyword search on searchQuery — it has no understanding of
+  // compound natural-language constraints. Confirmed in testing: a
+  // fully-specified query like "Nigerian B2B SaaS companies 10-100
+  // employees" matched nothing, "software company Nigeria" matched a US
+  // company on the word "software" alone while ignoring "Nigeria", and a
+  // single generic word matched purely on name-substring (returned every
+  // company with that word in its name, regardless of relevance) — because
+  // geography and headcount were being crammed into free text instead of
+  // this actor's own dedicated `locations` / `companySize` filter fields,
+  // which are passed through here when the caller supplies them.
+  const body: Record<string, unknown> = { searchQuery, maxItems: limit };
+  if (locations && locations.length > 0) body.locations = locations;
+  if (companySize && companySize.length > 0) body.companySize = companySize;
+
   const startRes = await fetch(`https://api.apify.com/v2/actors/${APIFY_ACTOR_ID}/runs?token=${APIFY_TOKEN}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ searchQuery, maxItems: limit }),
+    body: JSON.stringify(body),
   });
   if (!startRes.ok) {
     throw new Error(`Apify actor run failed to start: ${startRes.status} ${await startRes.text()}`);
