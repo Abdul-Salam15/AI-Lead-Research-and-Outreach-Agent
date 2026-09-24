@@ -398,22 +398,25 @@
   // Intake
   // ---------------------------------------------------------------------
 
+  function objectiveCompanyCount(objective) {
+    const match = (objective || "").match(/^\s*find\s+(\d{1,3})\b/i);
+    if (!match) return null;
+    const n = Number(match[1]);
+    return n >= 1 && n <= 100 ? n : null;
+  }
+
   function renderIntake(app) {
-    state.targetLeadsTouched = false;
     const defaultTarget = appConfig.defaultTargetQualifiedLeads || 10;
     app.innerHTML = `
       <div class="view">
         <section class="hero-grid">
           <div class="hero-copy">
             <h1 class="h1" style="font-size: 46px; line-height: 1.08;">Open a case on your next ten accounts.</h1>
-            <p class="lede" style="margin-bottom: 28px;">Write the qualification objective in one line. Casefile refines it into an ICP, researches candidate companies, files the evidence behind every verdict, and drafts outreach for you to review.</p>
+            <p class="lede" style="margin-bottom: 28px;">Write the qualification objective in one line, starting with how many companies to look at (e.g. "Find 10 ..."). Casefile refines it into an ICP, researches that many candidate companies, files the evidence behind every verdict, and drafts outreach for the ones that qualify.</p>
             <div class="field">
               <label class="field__label" for="objective">Research objective</label>
               <textarea id="objective" class="textarea" rows="3" placeholder="Find 10 US B2B SaaS companies, 10–100 employees, that may need AI automation support" data-action="objective-input"></textarea>
-            </div>
-            <div class="field" style="max-width: 220px;">
-              <label class="field__label" for="target-leads">Target qualified leads</label>
-              <input type="number" min="1" max="100" class="input" id="target-leads" value="${defaultTarget}" data-action="target-leads-input">
+              <div id="objective-count-hint" class="muted" style="font-size: 12.5px; margin-top: 6px;">Will search for ${defaultTarget} companies (no count found in the objective — using the default).</div>
             </div>
             <div style="display: flex; align-items: center; gap: 14px; margin-top: 20px;">
               <button type="button" class="btn btn--primary" data-action="start-research">Start research</button>
@@ -451,15 +454,13 @@
   async function startResearch() {
     const textarea = document.getElementById("objective");
     const objective = (textarea.value || "").trim();
-    const targetInput = document.getElementById("target-leads");
-    const targetQualifiedLeads = Math.max(1, Math.round(Number(targetInput && targetInput.value)) || 10);
     const errorEl = document.getElementById("intake-error");
     errorEl.textContent = "";
     if (!objective) { errorEl.textContent = "Write a research objective first."; return; }
     try {
       const result = await api("/api/runs", {
         method: "POST",
-        body: JSON.stringify({ objective, targetQualifiedLeads }),
+        body: JSON.stringify({ objective }),
       });
       navigate(`#/run/${result.id}`);
     } catch (err) {
@@ -708,14 +709,17 @@
       });
     }
 
-    const shortfall = ["completed", "partial", "stopped"].includes(run.status) && run.leads_qualified < run.target_qualified_leads;
+    // Not every company researched is expected to qualify — that's
+    // qualification doing its job, not a shortfall. Only flag the
+    // genuinely notable case: nothing in the researched set qualified.
+    const noneQualified = ["completed", "partial", "stopped"].includes(run.status) && run.leads_qualified === 0 && leads.length > 0;
 
     return `
-      ${shortfall ? `
+      ${noneQualified ? `
         <div class="shortfall-banner">
           <div>
-            <div style="font-family:Fraunces,serif;font-weight:600;font-size:16.5px;margin-bottom:5px;">${run.leads_qualified} qualified of ${run.target_qualified_leads} requested</div>
-            <div style="font-size:14px;color:#4C5158;">The run finished without reaching the target. Review the leads below, or start a new run with a wider objective.</div>
+            <div style="font-family:Fraunces,serif;font-weight:600;font-size:16.5px;margin-bottom:5px;">0 of ${run.target_qualified_leads} researched companies qualified</div>
+            <div style="font-size:14px;color:#4C5158;">Review the leads below to see why, or start a new run with a different objective.</div>
           </div>
         </div>
       ` : ""}
@@ -1362,16 +1366,14 @@
       segs.forEach((seg, i) => { seg.style.background = i < score ? "#3D6E58" : "#DAD5C6"; });
       return;
     }
-    if (action === "target-leads-input") { state.targetLeadsTouched = true; return; }
     if (action === "objective-input") {
-      // Convenience prefill only — startResearch() always sends whatever
-      // is actually in the target-leads field, so this never silently
-      // overrides a number the user set on purpose.
-      if (state.targetLeadsTouched) return;
-      const match = el.value.match(/^\s*find\s+(\d{1,3})\b/i);
-      if (!match) return;
-      const targetInput = document.getElementById("target-leads");
-      if (targetInput) targetInput.value = match[1];
+      const hint = document.getElementById("objective-count-hint");
+      if (!hint) return;
+      const defaultTarget = appConfig.defaultTargetQualifiedLeads || 10;
+      const count = objectiveCompanyCount(el.value);
+      hint.textContent = count
+        ? `Will search for ${count} companies, as stated in the objective.`
+        : `Will search for ${defaultTarget} companies (no count found in the objective — using the default). Start the objective with "Find N ..." to set your own.`;
       return;
     }
   });

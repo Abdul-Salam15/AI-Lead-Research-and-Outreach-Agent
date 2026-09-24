@@ -6,30 +6,42 @@ const router = Router();
 
 router.use(requireAuth);
 
+// The objective is the only place the user states how many companies to
+// look at (e.g. "Find 10 US B2B SaaS companies..."). Anchored to the start
+// of the string so a number appearing later in the sentence (e.g. "10-100
+// employees") is never mistaken for the company count.
+const LEADING_FIND_COUNT = /^\s*find\s+(\d{1,3})\b/i;
+
+function extractCompanyCount(objective: string): number | null {
+  const match = objective.match(LEADING_FIND_COUNT);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return n >= 1 && n <= 100 ? n : null;
+}
+
 router.post("/", async (req, res) => {
-  const { objective, maxCandidates, maxScrapes, targetQualifiedLeads } = req.body ?? {};
+  const { objective } = req.body ?? {};
 
   if (!objective || typeof objective !== "string") {
     return res.status(400).json({ error: "objective is required" });
   }
 
-  const resolvedTargetQualifiedLeads = targetQualifiedLeads ?? Number(process.env.TARGET_QUALIFIED_LEADS ?? 10);
-
-  // max_candidates is the run-wide candidate target — how many distinct
-  // companies this run should aim to accumulate in total (not the per-call
-  // Apify request size, which is separately self-calibrated — see
-  // src/agent/runAgent.ts / src/lib/apify.ts). Appendix A: "MAX_CANDIDATES
-  // should be meaningfully higher than TARGET_QUALIFIED_LEADS" — 3x here.
-  const resolvedMaxCandidates = maxCandidates ?? resolvedTargetQualifiedLeads * 3;
+  // This is now the run's one and only size knob, taken straight from the
+  // objective instead of a separate "how many" input: the agent discovers
+  // up to this many companies and qualifies whichever of them fit, rather
+  // than searching further to chase a qualified-lead count. Ending with
+  // fewer qualified leads than companies searched is the expected, normal
+  // outcome, not a shortfall to search harder to fix.
+  const companyCount = extractCompanyCount(objective) ?? Number(process.env.TARGET_QUALIFIED_LEADS ?? 10);
 
   const { data: run, error } = await req.supabaseUser!
     .from("runs")
     .insert({
       objective,
-      max_candidates: resolvedMaxCandidates,
-      max_scrapes: maxScrapes ?? Number(process.env.MAX_SCRAPES ?? 20),
+      max_candidates: companyCount,
+      max_scrapes: Number(process.env.MAX_SCRAPES ?? 20),
       max_turns: Number(process.env.MAX_TURNS ?? 40),
-      target_qualified_leads: resolvedTargetQualifiedLeads,
+      target_qualified_leads: companyCount,
       user_id: req.user!.id,
     })
     .select()
