@@ -51,6 +51,7 @@ async function main() {
     scrapesUsed: 0,
     discoveredDomains: new Set(),
     discoveryCallsUsed: 0,
+    scrapedDomains: new Set(),
   };
   const server = buildToolServer(ctx);
   console.log(`4. buildToolServer(ctx) returned an MCP server: ${!!server}`);

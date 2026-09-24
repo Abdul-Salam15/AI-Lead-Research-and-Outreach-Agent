@@ -1,8 +1,53 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { supabase } from "../lib/supabase";
-import { discoverCompaniesViaApify, updateDiscoveryCalibration } from "../lib/apify";
+import { discoverCompaniesViaApify, updateDiscoveryCalibration, DiscoveredCompany } from "../lib/apify";
 import { scrapeUrl } from "../lib/scrape";
+
+// Hard ceiling on the size of what discover_companies hands back to the
+// model, independent of perCallCandidateLimit/calibration. Observed
+// failure: a single call returned ~57.5KB of (already field-trimmed —
+// see apify.ts KEEP_FIELDS) company data, which exceeded the Claude Agent
+// SDK's own inline tool-result size limit. Past that limit the SDK writes
+// the result to a file on disk and expects the model to fetch it with
+// Read/Bash/Agent — none of which are in this run's ALLOWED_TOOLS (see
+// hooks.ts). The result: the model could never retrieve the data, burned
+// three tool calls getting blocked (Read, then Bash, then Agent), gave up,
+// and qualified leads off whatever partial data happened to still be
+// visible. Truncating here guarantees every discover_companies response
+// stays servable no matter how high calibration has ramped
+// perCallCandidateLimit. The SDK's exact threshold isn't published, so
+// this is set with a wide safety margin under the 57.5KB that broke it.
+const MAX_DISCOVER_RESPONSE_CHARS = 6000;
+
+// Used both to normalize a discover_companies result's website into a
+// comparable domain and, in save_lead below, to check a cited source URL
+// against a company's own scraped domain.
+function hostnameOf(url: string): string {
+  try {
+    const withScheme = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+    return new URL(withScheme).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+// Trims `items` down to however many fit within MAX_DISCOVER_RESPONSE_CHARS
+// once serialized, always keeping at least the first item (an over-budget
+// single item still beats returning nothing). Only the returned subset is
+// ever shown to the model, so only it should count toward
+// discoveredDomains — a company the model never saw can't be qualified.
+function fitDiscoverResponseBudget(items: DiscoveredCompany[]): { visible: DiscoveredCompany[]; omitted: number } {
+  const visible: DiscoveredCompany[] = [];
+  let size = 2; // "[" + "]"
+  for (const item of items) {
+    const itemSize = JSON.stringify(item).length + 1; // +1 for the joining comma
+    if (visible.length > 0 && size + itemSize > MAX_DISCOVER_RESPONSE_CHARS) break;
+    visible.push(item);
+    size += itemSize;
+  }
+  return { visible, omitted: items.length - visible.length };
+}
 
 // Ceiling on the number of discover_companies *calls* per run — each call
 // is a real, separately-billed Apify actor run regardless of how many
@@ -46,6 +91,12 @@ export interface RunContext {
   scrapesUsed: number; // mutated in place as the run progresses
   discoveredDomains: Set<string>; // accumulates across every discover_companies call this run
   discoveryCallsUsed: number; // mutated in place, synchronously, before each Apify call
+  // Hostnames scrape_website has actually been called for this run
+  // (recorded whether the fetch succeeded or failed) — save_lead checks
+  // this so the agent can't cite a company's own website as evidence, or
+  // claim it "failed to load," without ever really having tried it. See
+  // the save_lead handler below.
+  scrapedDomains: Set<string>;
 }
 
 export function buildToolServer(ctx: RunContext) {
@@ -131,17 +182,32 @@ export function buildToolServer(ctx: RunContext) {
         locations,
         companySize
       );
-      for (const item of items) {
+
+      // Calibration learns from the real Apify result, unaffected by how
+      // much of it we can actually show the model below.
+      await updateDiscoveryCalibration(costUsd, items.length);
+
+      const { visible, omitted } = fitDiscoverResponseBudget(items);
+      for (const item of visible) {
         if (item.domain) ctx.discoveredDomains.add(item.domain);
       }
-
-      await updateDiscoveryCalibration(costUsd, items.length);
 
       await supabase.from("runs")
         .update({ companies_discovered: Math.min(ctx.discoveredDomains.size, ctx.maxCandidates) })
         .eq("id", ctx.runId);
 
-      return { content: [{ type: "text", text: JSON.stringify(items) }] };
+      const text = omitted > 0
+        ? JSON.stringify(visible) +
+          `\n\n(${omitted} more result(s) from this search were left out to stay within ` +
+          "this tool's output size limit — they were never shown to you and don't count " +
+          `toward this run's candidates. Only the ${visible.length} company/companies above ` +
+          "are usable. Do not try to retrieve the rest via Read, Bash, Agent, or any other " +
+          "tool — they are not accessible that way and those tools are outside this run's " +
+          "allowed set anyway. If you want more candidates, call discover_companies again " +
+          "with a different or narrower searchQuery instead.)"
+        : JSON.stringify(visible);
+
+      return { content: [{ type: "text", text }] };
     }
   );
 
@@ -162,8 +228,18 @@ export function buildToolServer(ctx: RunContext) {
         };
       }
       ctx.scrapesUsed++;
-      const text = await scrapeUrl(url);
+      // Recorded before the fetch, and regardless of whether it throws —
+      // save_lead only needs to know a real attempt was made against this
+      // hostname (an error is still a legitimate "this site failed to
+      // load"), not that it succeeded.
+      try {
+        ctx.scrapedDomains.add(new URL(url).hostname.replace(/^www\./, ""));
+      } catch {
+        // Invalid URL was already rejected by the zod schema above in
+        // practice; nothing useful to record if it somehow isn't.
+      }
       await supabase.from("runs").update({ sites_scraped: ctx.scrapesUsed }).eq("id", ctx.runId);
+      const text = await scrapeUrl(url);
       return {
         content: [{
           type: "text",
@@ -222,6 +298,34 @@ export function buildToolServer(ctx: RunContext) {
       }).optional(),
     },
     async (lead) => {
+      // Guards against a real observed failure: the agent cited a
+      // company's own website in source_urls (and even described it as
+      // having "failed to load") without ever calling scrape_website on
+      // it — a fabricated fact, not evidence. A company's own domain can
+      // only appear in source_urls once scrape_website has actually been
+      // attempted against it this run; LinkedIn/discovery-only URLs are
+      // unaffected. Checks the site's own hostname, not company_domain
+      // directly, so a source_urls entry on a different subdomain/path of
+      // the same site is still caught by the hostname match.
+      const citesUnscrapedOwnSite = lead.source_urls.some((u) => {
+        const host = hostnameOf(u);
+        return host && lead.company_domain && host === lead.company_domain && !ctx.scrapedDomains.has(host);
+      });
+      if (citesUnscrapedOwnSite) {
+        return {
+          content: [{
+            type: "text",
+            text: `REJECTED: source_urls cites ${lead.company_domain} (the company's own ` +
+                  "site), but scrape_website was never called for that domain this run. " +
+                  "Never state or imply a website loaded, failed to load, or was otherwise " +
+                  "checked unless you actually called scrape_website on it. Either call " +
+                  "scrape_website on it first, or remove it from source_urls and base the " +
+                  "decision on discovery data alone.",
+          }],
+          isError: true,
+        };
+      }
+
       // outreach is schema-optional (a not_qualified/needs_review company
       // has none), but the PRD's own deliverable requires every QUALIFIED
       // lead to carry a full 3-step email sequence and a LinkedIn message —

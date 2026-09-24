@@ -65,6 +65,7 @@ export async function runAgent(runId: string) {
     scrapesUsed: 0,
     discoveredDomains: new Set(),
     discoveryCallsUsed: 0,
+    scrapedDomains: new Set(),
   };
 
   const toolServer = buildToolServer(ctx);
