@@ -185,7 +185,6 @@
       el.style.border = ""; el.style.background = ""; el.style.padding = "";
       el.innerHTML = `
         <span class="app-header__notice-dot"></span>
-        <span class="app-header__notice-text">Drafts only. Casefile never sends outreach and never finds or validates email addresses.</span>
       `;
     }
   }
