@@ -420,7 +420,7 @@
             </div>
             <div style="display: flex; align-items: center; gap: 14px; margin-top: 20px;">
               <button type="button" class="btn btn--primary" data-action="start-research">Start research</button>
-              <span class="muted" style="font-size: 13px;">Typical run: 6–9 minutes</span>
+              <span class="muted" style="font-size: 13px;">Typical run: 7–15 minutes</span>
             </div>
             <div id="intake-error" class="muted" style="color: #6F3B36; font-size: 13.5px; margin-top: 10px;"></div>
           </div>
