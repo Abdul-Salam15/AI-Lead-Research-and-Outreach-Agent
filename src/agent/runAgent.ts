@@ -65,6 +65,7 @@ export async function runAgent(runId: string) {
     scrapesUsed: 0,
     discoveredDomains: new Set(),
     discoveryCallsUsed: 0,
+    discoverySpendUsedUsd: 0,
     scrapedDomains: new Set(),
   };
 
@@ -72,9 +73,9 @@ export async function runAgent(runId: string) {
 
   try {
     const stream = query({
-      prompt: `Qualification objective: ${run.objective}\n\nCompanies to research: ${run.max_candidates}`,
+      prompt: `Qualification objective: ${run.objective}\n\nTarget qualified leads: ${run.target_qualified_leads}`,
       options: {
-        systemPrompt: buildSystemPrompt(run.max_candidates, run.max_scrapes),
+        systemPrompt: buildSystemPrompt(run.target_qualified_leads, run.max_candidates, run.max_scrapes),
         cwd: process.cwd(),
         settingSources: ["project"],       // discovers .claude/skills/ at project root
         skills: "all",
@@ -118,21 +119,22 @@ export async function runAgent(runId: string) {
   } catch (err: any) {
     const errorMessage = String(err?.message ?? err);
 
-    // Running out of turns or budget after saving real leads isn't a
-    // failure — it's the same "finished short of target" concept the UI
-    // already surfaces as "partial". Only genuine errors (crashes, auth
-    // failures, network errors) should still read as "failed". Detected by
-    // matching the phrasing actually observed from the SDK/CLI in testing
-    // (e.g. "Reached maximum number of turns (40)"), since there's no
-    // structured error code surfaced through the thrown error itself.
-    const hitAConfiguredLimit = /max.{0,3}(turns|budget)/i.test(errorMessage);
+    // Any real progress (at least one saved lead) is reported as "partial"
+    // regardless of *why* the run stopped — a turn/budget limit, a network
+    // blip, an Apify poll timeout, anything else. Those leads are genuinely
+    // there and reviewable, so calling the run "failed" when it actually
+    // produced usable output understates real progress. Previously this
+    // only applied when the error message matched a turn/budget-limit
+    // pattern, so a transient failure after saving several good leads was
+    // misreported as fully "failed". "failed" is now reserved for a run
+    // that produced nothing at all.
     const { count: leadCount } = await supabase
       .from("leads")
       .select("*", { count: "exact", head: true })
       .eq("run_id", runId);
 
     const { data: updatedRun } = await supabase.from("runs").update({
-      status: hitAConfiguredLimit && (leadCount ?? 0) > 0 ? "partial" : "failed",
+      status: (leadCount ?? 0) > 0 ? "partial" : "failed",
       error_message: errorMessage,
       completed_at: new Date().toISOString(),
     }).eq("id", runId).eq("status", "running").select().maybeSingle();

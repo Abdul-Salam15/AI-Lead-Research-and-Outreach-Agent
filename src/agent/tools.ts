@@ -1,7 +1,7 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { supabase } from "../lib/supabase";
-import { discoverCompaniesViaApify, updateDiscoveryCalibration, DiscoveredCompany } from "../lib/apify";
+import { discoverCompaniesViaApify, updateDiscoveryCalibration, DiscoveredCompany, MAX_DISCOVERY_SPEND_PER_RUN_USD } from "../lib/apify";
 import { scrapeUrl } from "../lib/scrape";
 
 // Hard ceiling on the size of what discover_companies hands back to the
@@ -91,6 +91,12 @@ export interface RunContext {
   scrapesUsed: number; // mutated in place as the run progresses
   discoveredDomains: Set<string>; // accumulates across every discover_companies call this run
   discoveryCallsUsed: number; // mutated in place, synchronously, before each Apify call
+  // Real cumulative Apify $ spent on discover_companies calls this run,
+  // checked against MAX_DISCOVERY_SPEND_PER_RUN_USD before every call —
+  // a hard ceiling independent of calibration, so a real per-event price
+  // spike can't run away with spend just because the count-based limits
+  // haven't been hit yet.
+  discoverySpendUsedUsd: number;
   // Hostnames scrape_website has actually been called for this run
   // (recorded whether the fetch succeeded or failed) — save_lead checks
   // this so the agent can't cite a company's own website as evidence, or
@@ -140,8 +146,20 @@ export function buildToolServer(ctx: RunContext) {
         "target should pass ['11-50', '51-200']. Always set this instead " +
         "of naming an employee count in searchQuery."
       ),
+      industries: z.array(z.string()).max(10).optional().describe(
+        "The ICP's own `industries` field, verbatim — e.g. ['Software / " +
+        "SaaS (general, cross-vertical)']. These are matched against " +
+        "LinkedIn's real industry taxonomy server-side and filtered on " +
+        "directly, on top of searchQuery — this is what keeps a company " +
+        "that only coincidentally matches your searchQuery text (e.g. an " +
+        "education company with 'SaaS' in its brand name) from being " +
+        "returned as a candidate at all. Always set this from the ICP " +
+        "instead of relying on searchQuery keywords alone. An industry " +
+        "name with no match in the taxonomy is silently ignored — safe to " +
+        "always include."
+      ),
     },
-    async ({ searchQuery, locations, companySize }) => {
+    async ({ searchQuery, locations, companySize, industries }) => {
       // Checked AND incremented synchronously, before the Apify await below —
       // this is what makes it safe when the agent dispatches several
       // discover_companies calls in parallel within one turn (confirmed
@@ -174,14 +192,31 @@ export function buildToolServer(ctx: RunContext) {
           }],
         };
       }
+      // Hard $ ceiling, independent of calibration and of the count-based
+      // checks above — see MAX_DISCOVERY_SPEND_PER_RUN_USD in apify.ts.
+      // Same best-effort race window as the discoveredDomains check above
+      // (real cost is only known after the Apify call resolves), which is
+      // fine: this is a backstop against a real per-event price spike, not
+      // the thing that bounds worst-case call count.
+      if (ctx.discoverySpendUsedUsd >= MAX_DISCOVERY_SPEND_PER_RUN_USD) {
+        return {
+          content: [{
+            type: "text",
+            text: "DISCOVERY BUDGET REACHED for this run. Do not search for " +
+                  "more companies — qualify using the candidates already found.",
+          }],
+        };
+      }
       ctx.discoveryCallsUsed++;
 
       const { items, costUsd } = await discoverCompaniesViaApify(
         searchQuery,
         ctx.perCallCandidateLimit,
         locations,
-        companySize
+        companySize,
+        industries
       );
+      ctx.discoverySpendUsedUsd += costUsd;
 
       // Calibration learns from the real Apify result, unaffected by how
       // much of it we can actually show the model below.

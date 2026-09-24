@@ -1,9 +1,22 @@
 import "dotenv/config";
 import { supabase } from "./supabase";
+import { resolveIndustryIds } from "./linkedinIndustries";
 
 const APIFY_TOKEN = process.env.APIFY_TOKEN!;
 const APIFY_ACTOR_ID = process.env.APIFY_ACTOR_ID!;
 const MAX_DISCOVERY_BUDGET_USD = Number(process.env.MAX_DISCOVERY_BUDGET_USD ?? 1);
+// A genuinely different knob from MAX_DISCOVERY_BUDGET_USD above: that one
+// only shapes how big a single call's result count is allowed to ramp to
+// (see updateDiscoveryCalibration's "desired" formula below) — it was never
+// a ceiling on total spend across a run's several discovery calls. Before
+// this, cost control was entirely count-based (call ceiling, per-call
+// result ceiling), so if the actor's real per-event price spiked
+// unexpectedly between calibration updates, a run could still rack up
+// ABSOLUTE_MAX_DISCOVERY_CALLS worth of real spend before anything caught
+// it. This is a hard, run-wide dollar ceiling enforced directly in
+// discover_companies (see tools.ts's RunContext.discoverySpendUsedUsd),
+// independent of calibration entirely.
+export const MAX_DISCOVERY_SPEND_PER_RUN_USD = Number(process.env.MAX_DISCOVERY_SPEND_PER_RUN_USD ?? 2);
 const SAFETY_MARGIN = 2; // Appendix A's own "− safety margin" in the sizing formula
 // The calibration STATE (discovery_calibration.current_max_candidates)
 // genuinely starts at 0 — "nothing learned yet" — and is displayed that
@@ -125,7 +138,8 @@ export async function discoverCompaniesViaApify(
   searchQuery: string,
   limit: number,
   locations?: string[],
-  companySize?: string[]
+  companySize?: string[],
+  industries?: string[]
 ): Promise<DiscoveryResult> {
   // The configured actor (harvestapi/linkedin-company-search) does literal
   // LinkedIn keyword search on searchQuery — it has no understanding of
@@ -141,6 +155,18 @@ export async function discoverCompaniesViaApify(
   const body: Record<string, unknown> = { searchQuery, maxItems: limit };
   if (locations && locations.length > 0) body.locations = locations;
   if (companySize && companySize.length > 0) body.companySize = companySize;
+  // `industries` (the ICP's own free-text industry names, e.g. "Software /
+  // SaaS") gets resolved to the actor's real `industryIds` filter — see
+  // resolveIndustryIds in linkedinIndustries.ts. This is what would have
+  // excluded "SAAS Group Global" (an education/HR company that only
+  // matched searchQuery on the literal substring "SaaS" in its name) from
+  // ever being discovered in the first place. Silently omitted, exactly
+  // like locations/companySize above, when nothing resolves — searchQuery
+  // keeps working keyword-only, same as before this filter existed.
+  if (industries && industries.length > 0) {
+    const industryIds = resolveIndustryIds(industries);
+    if (industryIds.length > 0) body.industryIds = industryIds;
+  }
 
   const startRes = await fetch(`https://api.apify.com/v2/actors/${APIFY_ACTOR_ID}/runs?token=${APIFY_TOKEN}`, {
     method: "POST",

@@ -397,7 +397,7 @@
   // Intake
   // ---------------------------------------------------------------------
 
-  function objectiveCompanyCount(objective) {
+  function objectiveTargetQualifiedLeads(objective) {
     const match = (objective || "").match(/^\s*find\s+(\d{1,3})\b/i);
     if (!match) return null;
     const n = Number(match[1]);
@@ -411,11 +411,11 @@
         <section class="hero-grid">
           <div class="hero-copy">
             <h1 class="h1" style="font-size: 46px; line-height: 1.08;">Open a case on your next ten accounts.</h1>
-            <p class="lede" style="margin-bottom: 28px;">Write the qualification objective in one line, starting with how many companies to look at (e.g. "Find 10 ..."). Casefile refines it into an ICP, researches that many candidate companies, files the evidence behind every verdict, and drafts outreach for the ones that qualify.</p>
+            <p class="lede" style="margin-bottom: 28px;">Write the qualification objective in one line, stating how many qualified leads you want (e.g. "Find 10 ..."). Casefile refines it into an ICP, searches as many candidate companies as it takes to land on that many qualified fits, files the evidence behind every verdict, and drafts outreach for each one.</p>
             <div class="field">
               <label class="field__label" for="objective">Research objective</label>
               <textarea id="objective" class="textarea" rows="3" placeholder="Find 10 US B2B SaaS companies, 10–100 employees, that may need AI automation support" data-action="objective-input"></textarea>
-              <div id="objective-count-hint" class="muted" style="font-size: 12.5px; margin-top: 6px;">Will search for ${defaultTarget} companies (no count found in the objective — using the default).</div>
+              <div id="objective-count-hint" class="muted" style="font-size: 12.5px; margin-top: 6px;">Will aim for ${defaultTarget} qualified leads (no count found in the objective — using the default).</div>
             </div>
             <div style="display: flex; align-items: center; gap: 14px; margin-top: 20px;">
               <button type="button" class="btn btn--primary" data-action="start-research">Start research</button>
@@ -708,17 +708,14 @@
       });
     }
 
-    // Not every company researched is expected to qualify — that's
-    // qualification doing its job, not a shortfall. Only flag the
-    // genuinely notable case: nothing in the researched set qualified.
-    const noneQualified = ["completed", "partial", "stopped"].includes(run.status) && run.leads_qualified === 0 && leads.length > 0;
+    const shortfall = ["completed", "partial", "stopped"].includes(run.status) && run.leads_qualified < run.target_qualified_leads;
 
     return `
-      ${noneQualified ? `
+      ${shortfall ? `
         <div class="shortfall-banner">
           <div>
-            <div style="font-family:Fraunces,serif;font-weight:600;font-size:16.5px;margin-bottom:5px;">0 of ${run.target_qualified_leads} researched companies qualified</div>
-            <div style="font-size:14px;color:#4C5158;">Review the leads below to see why, or start a new run with a different objective.</div>
+            <div style="font-family:Fraunces,serif;font-weight:600;font-size:16.5px;margin-bottom:5px;">${run.leads_qualified} qualified of ${run.target_qualified_leads} requested</div>
+            <div style="font-size:14px;color:#4C5158;">The run finished without reaching the target. Review the leads below, or start a new run with a wider objective.</div>
           </div>
         </div>
       ` : ""}
@@ -1369,10 +1366,10 @@
       const hint = document.getElementById("objective-count-hint");
       if (!hint) return;
       const defaultTarget = appConfig.defaultTargetQualifiedLeads || 10;
-      const count = objectiveCompanyCount(el.value);
+      const count = objectiveTargetQualifiedLeads(el.value);
       hint.textContent = count
-        ? `Will search for ${count} companies, as stated in the objective.`
-        : `Will search for ${defaultTarget} companies (no count found in the objective — using the default). Start the objective with "Find N ..." to set your own.`;
+        ? `Will aim for ${count} qualified leads, as stated in the objective.`
+        : `Will aim for ${defaultTarget} qualified leads (no count found in the objective — using the default). Start the objective with "Find N ..." to set your own.`;
       return;
     }
   });

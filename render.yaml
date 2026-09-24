@@ -52,6 +52,8 @@ services:
         value: "3"
       - key: MAX_DISCOVERY_BUDGET_USD
         value: "1"
+      - key: MAX_DISCOVERY_SPEND_PER_RUN_USD
+        value: "2"
       - key: TARGET_QUALIFIED_LEADS
         value: "10"
       - key: REGENERATE_LIMIT
