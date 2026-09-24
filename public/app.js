@@ -32,6 +32,14 @@
     return n === null || n === undefined ? "—" : "$" + Number(n).toFixed(2);
   }
 
+  function passwordStrength(pw) {
+    let score = 0;
+    if (pw.length >= 12) score++;
+    if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) score++;
+    if (/[0-9]/.test(pw) && /[^A-Za-z0-9]/.test(pw)) score++;
+    return score;
+  }
+
   function statusLabel(status) {
     if (status === "qualified") return "Qualified";
     if (status === "needs_review") return "Needs review";
@@ -40,9 +48,18 @@
   }
 
   async function api(path, options) {
-    const res = await fetch(path, Object.assign({ headers: { "Content-Type": "application/json" } }, options));
+    const headers = { "Content-Type": "application/json" };
+    if (state.session && state.session.access_token) {
+      headers.Authorization = "Bearer " + state.session.access_token;
+    }
+    const res = await fetch(path, Object.assign({ headers }, options));
     let body = null;
     try { body = await res.json(); } catch { /* no body */ }
+    if (res.status === 401) {
+      state.session = null;
+      renderAccountBar();
+      navigate("#/login");
+    }
     if (!res.ok) {
       const err = new Error((body && body.error) || `Request failed: ${res.status}`);
       err.status = res.status;
@@ -101,7 +118,13 @@
   // App state
   // ---------------------------------------------------------------------
 
+  // The Supabase client (auth only — all data access still goes through
+  // this app's own /api/* routes, never straight to Supabase from the
+  // browser). Created once /api/config resolves — see initAuth().
+  let sb = null;
+
   const state = {
+    session: null,
     runCache: {},
     leadsCache: {},
     toolCallsCache: {},
@@ -146,10 +169,43 @@
 
   function navigate(hash) { location.hash = hash; }
 
+  const PUBLIC_VIEWS = new Set(["login", "signup", "forgot-password", "reset-password"]);
+
+  function updateHeaderNotice(isAuthView) {
+    const el = document.getElementById("header-notice");
+    if (!el) return;
+    if (isAuthView) {
+      el.className = "";
+      el.style.border = "none";
+      el.style.background = "transparent";
+      el.style.padding = "0";
+      el.innerHTML = `<span class="app-header__notice-text">Internal tool for the Koya Talent outbound team</span>`;
+    } else {
+      el.className = "app-header__notice";
+      el.style.border = ""; el.style.background = ""; el.style.padding = "";
+      el.innerHTML = `
+        <span class="app-header__notice-dot"></span>
+        <span class="app-header__notice-text">Drafts only. Casefile never sends outreach and never finds or validates email addresses.</span>
+      `;
+    }
+  }
+
   function render() {
     stopPolling();
     const { view, params } = parseHash();
     const app = document.getElementById("app");
+    updateHeaderNotice(PUBLIC_VIEWS.has(view));
+
+    // Auth gate — every real view requires a session; the auth views
+    // themselves redirect away once one exists (except reset-password,
+    // which needs the just-established recovery session to stay put).
+    if (!state.session && !PUBLIC_VIEWS.has(view)) return navigate("#/login");
+    if (state.session && PUBLIC_VIEWS.has(view) && view !== "reset-password") return navigate("#/intake");
+
+    if (view === "login") return renderLogin(app);
+    if (view === "signup") return renderSignup(app);
+    if (view === "forgot-password") return renderForgotPassword(app);
+    if (view === "reset-password") return renderResetPassword(app);
     if (view === "run") return renderRun(app, params.runId);
     if (view === "dashboard") return renderDashboard(app, params.runId, params.tab);
     if (view === "lead") return renderDetail(app, params.runId, params.leadId);
@@ -160,10 +216,185 @@
   window.addEventListener("hashchange", render);
 
   // ---------------------------------------------------------------------
+  // Auth (Supabase Auth) — signup/login/forgot-password are handled
+  // entirely client-side against Supabase directly; this app's own backend
+  // only ever verifies the resulting JWT (see src/middleware/requireAuth.ts).
+  // ---------------------------------------------------------------------
+
+  function renderAccountBar() {
+    const nav = document.getElementById("app-nav");
+    const account = document.getElementById("header-account");
+    if (!nav || !account) return;
+    if (state.session && state.session.user) {
+      nav.style.display = "";
+      account.innerHTML = `
+        <span class="muted mono" style="font-size:12.5px;">${esc(state.session.user.email)}</span>
+        <button type="button" class="btn" data-action="logout" style="margin-left:10px;padding:4px 10px;font-size:12.5px;">Log out</button>
+      `;
+    } else {
+      nav.style.display = "none";
+      account.innerHTML = "";
+    }
+  }
+
+  // Set when initAuth() fails (e.g. the backend is running code from
+  // before /api/config existed — a stale, un-restarted server, not a
+  // frontend bug). Every auth action checks this via requireSb() instead
+  // of throwing an opaque, invisible error when `sb` turns out to be null.
+  let authInitError = null;
+  // Populated from /api/config — currently just the run-defaults the
+  // intake form prefills (see renderIntake). Never holds secrets: the
+  // Supabase URL/anon key are read directly out of `config` below instead
+  // of being stored here, since they're only needed once, at client init.
+  let appConfig = {};
+
+  async function initAuth() {
+    try {
+      const config = await fetch("/api/config").then((r) => r.json());
+      if (!config.supabaseUrl || !config.supabaseAnonKey) {
+        throw new Error("Server is missing Supabase config (check /api/config and .env)");
+      }
+      appConfig = config;
+      sb = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey, {
+        auth: { flowType: "pkce" },
+      });
+
+      // Password-recovery landing: resetPasswordForEmail redirects here with
+      // ?code=...&type=recovery (query, not hash — the hash is this app's
+      // own router). Exchange it for a session, then hand off to the router.
+      const query = new URLSearchParams(location.search);
+      if (query.get("code") && query.get("type") === "recovery") {
+        await sb.auth.exchangeCodeForSession(window.location.href);
+        history.replaceState(null, "", location.pathname + location.hash);
+        navigate("#/reset-password");
+      }
+
+      const { data } = await sb.auth.getSession();
+      state.session = data.session;
+      renderAccountBar();
+
+      sb.auth.onAuthStateChange((_event, session) => {
+        state.session = session;
+        renderAccountBar();
+      });
+    } catch (err) {
+      console.error("initAuth failed — sign-in/sign-up will not work until this is fixed:", err);
+      authInitError = "Couldn't reach the sign-in service. Try refreshing the page — if that doesn't help, the server may need a restart.";
+    }
+  }
+
+  // Every do-* auth action calls this first: `sb` can legitimately still be
+  // null (initAuth() hasn't resolved yet, or failed outright) — this turns
+  // that into a visible message instead of a silent, uncaught TypeError.
+  function requireSb(errorEl) {
+    if (!sb) {
+      errorEl.textContent = authInitError || "Still connecting — wait a moment and try again.";
+      return false;
+    }
+    return true;
+  }
+
+  const EYE_ICON = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/></svg>`;
+
+  function passwordField(opts) {
+    const { id, label, autocomplete, forgotLink, strengthMeter, hint } = opts;
+    return `
+      <div class="field">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;">
+          <label class="field__label" for="${id}" style="margin-bottom:4px;">${label}</label>
+          ${forgotLink ? `<a href="#/forgot-password" style="font-size:12.5px;">Forgot password?</a>` : ""}
+        </div>
+        <div style="position:relative;">
+          <input class="input" type="password" id="${id}" autocomplete="${autocomplete}" style="padding-right:40px;" ${strengthMeter ? 'data-action="password-strength"' : ""}>
+          <button type="button" class="btn--icon" data-action="toggle-password" data-target="${id}" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);" aria-label="Show password">${EYE_ICON}</button>
+        </div>
+        ${strengthMeter ? `
+          <div style="display:flex;gap:4px;margin-top:8px;">
+            <div class="pw-strength-seg" style="height:3px;flex:1;border-radius:2px;background:#DAD5C6;"></div>
+            <div class="pw-strength-seg" style="height:3px;flex:1;border-radius:2px;background:#DAD5C6;"></div>
+            <div class="pw-strength-seg" style="height:3px;flex:1;border-radius:2px;background:#DAD5C6;"></div>
+          </div>
+        ` : ""}
+        ${hint ? `<div class="muted" style="font-size:12.5px;margin-top:6px;">${hint}</div>` : ""}
+      </div>
+    `;
+  }
+
+  function authView(opts) {
+    const { title, lede, cardBody, footerHtml, backLink } = opts;
+    return `
+      <div class="view" style="max-width:560px;margin:0 auto;padding-top:88px;">
+        ${backLink ? `<div style="margin-bottom:22px;"><a href="${backLink.href}">&larr; ${esc(backLink.label)}</a></div>` : ""}
+        <h1 class="h1" style="font-size:38px;margin-bottom:10px;">${title}</h1>
+        ${lede ? `<p class="lede">${lede}</p>` : ""}
+        <div class="card">${cardBody}</div>
+        ${footerHtml ? `<div class="muted" style="margin-top:20px;font-size:14px;">${footerHtml}</div><div class="hairline"></div>` : ""}
+      </div>
+    `;
+  }
+
+  function renderLogin(app) {
+    app.innerHTML = authView({
+      title: "Sign in to Casefile",
+      lede: "Pick up your open runs and case files where you left them.",
+      cardBody: `
+        <div class="field"><label class="field__label" for="auth-email">Email</label><input class="input" type="email" id="auth-email" placeholder="you@example.com" autocomplete="email"></div>
+        ${passwordField({ id: "auth-password", label: "Password", autocomplete: "current-password", forgotLink: true })}
+        <div id="auth-error" class="muted" style="color:#6F3B36;font-size:13.5px;margin:8px 0;"></div>
+        <button type="button" class="btn btn--primary" style="width:100%;justify-content:center;" data-action="do-login">Sign in</button>
+      `,
+      footerHtml: `New to the team? <a href="#/signup">Create an account</a>`,
+    });
+  }
+
+  function renderSignup(app) {
+    app.innerHTML = authView({
+      title: "Create your account",
+      lede: "Your reviews and approvals are recorded under your name.",
+      cardBody: `
+        <div class="field"><label class="field__label" for="auth-name">Full name</label><input class="input" type="text" id="auth-name" autocomplete="name"></div>
+        <div class="field"><label class="field__label" for="auth-email">Email</label><input class="input" type="email" id="auth-email" placeholder="you@example.com" autocomplete="email"></div>
+        ${passwordField({ id: "auth-password", label: "Password", autocomplete: "new-password", strengthMeter: true, hint: "At least 12 characters." })}
+        <div id="auth-error" class="muted" style="color:#6F3B36;font-size:13.5px;margin:8px 0;"></div>
+        <div id="auth-info" class="muted" style="font-size:13.5px;margin:8px 0;"></div>
+        <button type="button" class="btn btn--primary" style="width:100%;justify-content:center;" data-action="do-signup">Create account</button>
+      `,
+      footerHtml: `Already have an account? <a href="#/login">Sign in</a>`,
+    });
+  }
+
+  function renderForgotPassword(app) {
+    app.innerHTML = authView({
+      title: "Reset your password",
+      lede: "Enter the email on your account. We'll send a link that sets a new password; it works once and expires after 30 minutes.",
+      backLink: { href: "#/login", label: "Back to sign in" },
+      cardBody: `
+        <div class="field"><label class="field__label" for="auth-email">Email</label><input class="input" type="email" id="auth-email" placeholder="you@example.com" autocomplete="email"></div>
+        <div id="auth-error" class="muted" style="color:#6F3B36;font-size:13.5px;margin:8px 0;"></div>
+        <div id="auth-info" class="muted" style="font-size:13.5px;margin:8px 0;"></div>
+        <button type="button" class="btn btn--primary" style="width:100%;justify-content:center;" data-action="do-forgot-password">Send reset link</button>
+      `,
+    });
+  }
+
+  function renderResetPassword(app) {
+    app.innerHTML = authView({
+      title: "Set a new password",
+      cardBody: `
+        ${passwordField({ id: "auth-password", label: "New password", autocomplete: "new-password", strengthMeter: true, hint: "At least 12 characters." })}
+        <div id="auth-error" class="muted" style="color:#6F3B36;font-size:13.5px;margin:8px 0;"></div>
+        <button type="button" class="btn btn--primary" style="width:100%;justify-content:center;" data-action="do-reset-password">Set password</button>
+      `,
+    });
+  }
+
+  // ---------------------------------------------------------------------
   // Intake
   // ---------------------------------------------------------------------
 
   function renderIntake(app) {
+    state.targetLeadsTouched = false;
+    const defaultTarget = appConfig.defaultTargetQualifiedLeads || 10;
     app.innerHTML = `
       <div class="view">
         <section class="hero-grid">
@@ -172,7 +403,11 @@
             <p class="lede" style="margin-bottom: 28px;">Write the qualification objective in one line. Casefile refines it into an ICP, researches candidate companies, files the evidence behind every verdict, and drafts outreach for you to review.</p>
             <div class="field">
               <label class="field__label" for="objective">Research objective</label>
-              <textarea id="objective" class="textarea" rows="3" placeholder="Find 10 US B2B SaaS companies, 10–100 employees, that may need AI automation support"></textarea>
+              <textarea id="objective" class="textarea" rows="3" placeholder="Find 10 US B2B SaaS companies, 10–100 employees, that may need AI automation support" data-action="objective-input"></textarea>
+            </div>
+            <div class="field" style="max-width: 220px;">
+              <label class="field__label" for="target-leads">Target qualified leads</label>
+              <input type="number" min="1" max="100" class="input" id="target-leads" value="${defaultTarget}" data-action="target-leads-input">
             </div>
             <div style="display: flex; align-items: center; gap: 14px; margin-top: 20px;">
               <button type="button" class="btn btn--primary" data-action="start-research">Start research</button>
@@ -210,11 +445,16 @@
   async function startResearch() {
     const textarea = document.getElementById("objective");
     const objective = (textarea.value || "").trim();
+    const targetInput = document.getElementById("target-leads");
+    const targetQualifiedLeads = Math.max(1, Math.round(Number(targetInput && targetInput.value)) || 10);
     const errorEl = document.getElementById("intake-error");
     errorEl.textContent = "";
     if (!objective) { errorEl.textContent = "Write a research objective first."; return; }
     try {
-      const result = await api("/api/runs", { method: "POST", body: JSON.stringify({ objective }) });
+      const result = await api("/api/runs", {
+        method: "POST",
+        body: JSON.stringify({ objective, targetQualifiedLeads }),
+      });
       navigate(`#/run/${result.id}`);
     } catch (err) {
       errorEl.textContent = err.message || "Couldn't start the run.";
@@ -866,6 +1106,116 @@
     const item = el.dataset.item;
     const runId = el.dataset.run;
 
+    if (action === "logout") {
+      if (sb) await sb.auth.signOut().catch(() => {});
+      state.session = null;
+      renderAccountBar();
+      return navigate("#/login");
+    }
+    if (action === "toggle-password") {
+      const input = document.getElementById(el.dataset.target);
+      if (!input) return;
+      input.type = input.type === "password" ? "text" : "password";
+      return;
+    }
+    if (action === "do-login") {
+      const errorEl = document.getElementById("auth-error");
+      errorEl.textContent = "";
+      if (!requireSb(errorEl)) return;
+      const email = document.getElementById("auth-email").value.trim();
+      const password = document.getElementById("auth-password").value;
+      const originalLabel = el.textContent;
+      el.disabled = true; el.textContent = "Signing in…";
+      try {
+        const { data, error } = await sb.auth.signInWithPassword({ email, password });
+        if (error) { errorEl.textContent = error.message; return; }
+        state.session = data.session;
+        renderAccountBar();
+        return navigate("#/intake");
+      } catch (err) {
+        errorEl.textContent = "Something went wrong — try again.";
+      } finally {
+        el.disabled = false; el.textContent = originalLabel;
+      }
+      return;
+    }
+    if (action === "do-signup") {
+      const errorEl = document.getElementById("auth-error");
+      const infoEl = document.getElementById("auth-info");
+      errorEl.textContent = ""; infoEl.textContent = "";
+      if (!requireSb(errorEl)) return;
+      const fullName = document.getElementById("auth-name").value.trim();
+      const email = document.getElementById("auth-email").value.trim();
+      const password = document.getElementById("auth-password").value;
+      if (password.length < 12) {
+        errorEl.textContent = "Password must be at least 12 characters.";
+        return;
+      }
+      const originalLabel = el.textContent;
+      el.disabled = true; el.textContent = "Creating account…";
+      try {
+        const { data, error } = await sb.auth.signUp({
+          email, password,
+          options: { data: { full_name: fullName } },
+        });
+        if (error) { errorEl.textContent = error.message; return; }
+        if (data.session) {
+          state.session = data.session;
+          renderAccountBar();
+          return navigate("#/intake");
+        }
+        infoEl.textContent = "Check your email to confirm your account, then log in.";
+      } catch (err) {
+        errorEl.textContent = "Something went wrong — try again.";
+      } finally {
+        el.disabled = false; el.textContent = originalLabel;
+      }
+      return;
+    }
+    if (action === "do-forgot-password") {
+      const errorEl = document.getElementById("auth-error");
+      const infoEl = document.getElementById("auth-info");
+      errorEl.textContent = ""; infoEl.textContent = "";
+      if (!requireSb(errorEl)) return;
+      const email = document.getElementById("auth-email").value.trim();
+      const originalLabel = el.textContent;
+      el.disabled = true; el.textContent = "Sending…";
+      try {
+        const { error } = await sb.auth.resetPasswordForEmail(email, {
+          redirectTo: window.location.origin + "/?type=recovery",
+        });
+        if (error) { errorEl.textContent = error.message; return; }
+        infoEl.textContent = "Check your email for a reset link.";
+      } catch (err) {
+        errorEl.textContent = "Something went wrong — try again.";
+      } finally {
+        el.disabled = false; el.textContent = originalLabel;
+      }
+      return;
+    }
+    if (action === "do-reset-password") {
+      const errorEl = document.getElementById("auth-error");
+      errorEl.textContent = "";
+      if (!requireSb(errorEl)) return;
+      const password = document.getElementById("auth-password").value;
+      if (password.length < 12) {
+        errorEl.textContent = "Password must be at least 12 characters.";
+        return;
+      }
+      const originalLabel = el.textContent;
+      el.disabled = true; el.textContent = "Setting password…";
+      try {
+        const { error } = await sb.auth.updateUser({ password });
+        if (error) { errorEl.textContent = error.message; return; }
+        return navigate("#/intake");
+      } catch (err) {
+        errorEl.textContent = "Something went wrong — try again.";
+      } finally {
+        el.disabled = false; el.textContent = originalLabel;
+      }
+      return;
+    }
+
     if (action === "start-research") return startResearch();
     if (action === "go-intake") return navigate("#/intake");
     if (action === "view-leads") return navigate(`#/dashboard/${runId}/leads`);
@@ -998,6 +1348,24 @@
     if (action === "draft-body") { getUi(el.dataset.lead, el.dataset.item).draft.body = el.value; return; }
     if (action === "draft-note") { getUi(el.dataset.lead, el.dataset.item).draft.note = el.value; return; }
     if (action === "regen-guidance") { getUi(el.dataset.lead, el.dataset.item).guidance = el.value; return; }
+    if (action === "password-strength") {
+      const score = passwordStrength(el.value);
+      const segs = el.parentElement.parentElement.querySelectorAll(".pw-strength-seg");
+      segs.forEach((seg, i) => { seg.style.background = i < score ? "#3D6E58" : "#DAD5C6"; });
+      return;
+    }
+    if (action === "target-leads-input") { state.targetLeadsTouched = true; return; }
+    if (action === "objective-input") {
+      // Convenience prefill only — startResearch() always sends whatever
+      // is actually in the target-leads field, so this never silently
+      // overrides a number the user set on purpose.
+      if (state.targetLeadsTouched) return;
+      const match = el.value.match(/^\s*find\s+(\d{1,3})\b/i);
+      if (!match) return;
+      const targetInput = document.getElementById("target-leads");
+      if (targetInput) targetInput.value = match[1];
+      return;
+    }
   });
 
   document.addEventListener("change", (e) => {
@@ -1009,5 +1377,5 @@
     if (action === "set-audit-status") { state.auditStatusFilter = el.value; render(); return; }
   });
 
-  window.addEventListener("DOMContentLoaded", render);
+  window.addEventListener("DOMContentLoaded", () => { initAuth().finally(render); });
 })();

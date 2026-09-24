@@ -1,8 +1,10 @@
 import { Router } from "express";
-import { supabase } from "../lib/supabase";
 import { runAgent, stopRun } from "../agent/runAgent";
+import { requireAuth } from "../middleware/requireAuth";
 
 const router = Router();
+
+router.use(requireAuth);
 
 router.post("/", async (req, res) => {
   const { objective, maxCandidates, maxScrapes, targetQualifiedLeads } = req.body ?? {};
@@ -20,7 +22,7 @@ router.post("/", async (req, res) => {
   // should be meaningfully higher than TARGET_QUALIFIED_LEADS" — 3x here.
   const resolvedMaxCandidates = maxCandidates ?? resolvedTargetQualifiedLeads * 3;
 
-  const { data: run, error } = await supabase
+  const { data: run, error } = await req.supabaseUser!
     .from("runs")
     .insert({
       objective,
@@ -28,6 +30,7 @@ router.post("/", async (req, res) => {
       max_scrapes: maxScrapes ?? Number(process.env.MAX_SCRAPES ?? 20),
       max_turns: Number(process.env.MAX_TURNS ?? 40),
       target_qualified_leads: resolvedTargetQualifiedLeads,
+      user_id: req.user!.id,
     })
     .select()
     .single();
@@ -37,7 +40,11 @@ router.post("/", async (req, res) => {
   }
 
   // Fire-and-forget — the HTTP request returns immediately and the
-  // frontend polls GET /api/runs/:id for progress.
+  // frontend polls GET /api/runs/:id for progress. runAgent itself reads
+  // and writes via the service-role client internally (it has no request
+  // context to scope a client to), which is fine — RLS only needs to gate
+  // the user-facing routes here, not the background agent's own access to
+  // a run it was explicitly asked to process.
   runAgent(run.id).catch((err) => {
     console.error(`runAgent(${run.id}) failed outside its own error handling:`, err);
   });
@@ -45,8 +52,8 @@ router.post("/", async (req, res) => {
   res.json({ id: run.id });
 });
 
-router.get("/", async (_req, res) => {
-  const { data, error } = await supabase
+router.get("/", async (req, res) => {
+  const { data, error } = await req.supabaseUser!
     .from("runs")
     .select("*")
     .order("created_at", { ascending: false });
@@ -59,7 +66,7 @@ router.get("/", async (_req, res) => {
 });
 
 router.get("/:id", async (req, res) => {
-  const { data, error } = await supabase
+  const { data, error } = await req.supabaseUser!
     .from("runs")
     .select("*")
     .eq("id", req.params.id)
@@ -76,7 +83,7 @@ router.get("/:id", async (req, res) => {
 });
 
 router.get("/:id/leads", async (req, res) => {
-  const { data: run, error: runError } = await supabase
+  const { data: run, error: runError } = await req.supabaseUser!
     .from("runs")
     .select("id")
     .eq("id", req.params.id)
@@ -89,7 +96,7 @@ router.get("/:id/leads", async (req, res) => {
     return res.status(404).json({ error: "Run not found" });
   }
 
-  const { data, error } = await supabase
+  const { data, error } = await req.supabaseUser!
     .from("leads")
     .select("*")
     .eq("run_id", req.params.id);
@@ -102,7 +109,7 @@ router.get("/:id/leads", async (req, res) => {
 });
 
 router.post("/:id/stop", async (req, res) => {
-  const { data: run, error } = await supabase
+  const { data: run, error } = await req.supabaseUser!
     .from("runs")
     .select("status")
     .eq("id", req.params.id)
@@ -129,7 +136,7 @@ router.post("/:id/stop", async (req, res) => {
 });
 
 router.get("/:id/tool-calls", async (req, res) => {
-  const { data: run, error: runError } = await supabase
+  const { data: run, error: runError } = await req.supabaseUser!
     .from("runs")
     .select("id")
     .eq("id", req.params.id)
@@ -142,7 +149,7 @@ router.get("/:id/tool-calls", async (req, res) => {
     return res.status(404).json({ error: "Run not found" });
   }
 
-  const { data, error } = await supabase
+  const { data, error } = await req.supabaseUser!
     .from("tool_calls")
     .select("*")
     .eq("run_id", req.params.id)

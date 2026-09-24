@@ -4,6 +4,7 @@ import { buildToolServer, RunContext } from "./tools";
 import { buildHooks } from "./hooks";
 import { buildSystemPrompt } from "./systemPrompt";
 import { getCurrentMaxCandidates } from "../lib/apify";
+import { notifyRunOwner } from "../lib/notify";
 
 // Runs currently in flight on this server process, keyed by run id — the
 // only way a separate HTTP request (POST /api/runs/:id/stop) can reach the
@@ -21,10 +22,12 @@ export async function stopRun(runId: string): Promise<boolean> {
   // Guarded by .eq("status", "running") so this is a no-op if runAgent's
   // own completion handler already wrote a final status first — whichever
   // write actually lands, the other becomes harmless.
-  const { error } = await supabase.from("runs")
+  const { data: updatedRun, error } = await supabase.from("runs")
     .update({ status: "stopped", completed_at: new Date().toISOString() })
     .eq("id", runId)
-    .eq("status", "running");
+    .eq("status", "running")
+    .select()
+    .maybeSingle();
 
   activeRuns.delete(runId);
 
@@ -34,6 +37,11 @@ export async function stopRun(runId: string): Promise<boolean> {
     // so "stopped" isn't a valid status value). Log it rather than swallow
     // it, since the caller has no other way to notice.
     console.error(`stopRun(${runId}): interrupted the agent but failed to write status=stopped:`, error.message);
+  } else if (updatedRun) {
+    // Only reached when THIS write actually won the race against
+    // runAgent's own completion handler — otherwise that handler already
+    // sent its own notification for whichever status landed first.
+    notifyRunOwner(updatedRun).catch(() => {});
   }
 
   return true;
@@ -98,11 +106,13 @@ export async function runAgent(runId: string) {
 
     // .eq("status", "running") makes this a no-op if stopRun() already won
     // the race and wrote "stopped" first.
-    await supabase.from("runs").update({
+    const { data: updatedRun } = await supabase.from("runs").update({
       status: "completed",
       total_cost_usd: totalCostUsd,
       completed_at: new Date().toISOString(),
-    }).eq("id", runId).eq("status", "running");
+    }).eq("id", runId).eq("status", "running").select().maybeSingle();
+
+    if (updatedRun) notifyRunOwner(updatedRun).catch(() => {});
 
   } catch (err: any) {
     const errorMessage = String(err?.message ?? err);
@@ -120,11 +130,13 @@ export async function runAgent(runId: string) {
       .select("*", { count: "exact", head: true })
       .eq("run_id", runId);
 
-    await supabase.from("runs").update({
+    const { data: updatedRun } = await supabase.from("runs").update({
       status: hitAConfiguredLimit && (leadCount ?? 0) > 0 ? "partial" : "failed",
       error_message: errorMessage,
       completed_at: new Date().toISOString(),
-    }).eq("id", runId).eq("status", "running");
+    }).eq("id", runId).eq("status", "running").select().maybeSingle();
+
+    if (updatedRun) notifyRunOwner(updatedRun).catch(() => {});
   } finally {
     activeRuns.delete(runId);
   }

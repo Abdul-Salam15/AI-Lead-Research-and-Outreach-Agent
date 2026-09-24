@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { supabase } from "../lib/supabase";
+import { requireAuth } from "../middleware/requireAuth";
 import {
   OUTREACH_ITEMS,
   OutreachItem,
@@ -9,6 +9,8 @@ import {
 } from "../lib/regenerateOutreach";
 
 const router = Router();
+
+router.use(requireAuth);
 
 function isOutreachItem(value: string): value is OutreachItem {
   return (OUTREACH_ITEMS as readonly string[]).includes(value);
@@ -28,7 +30,11 @@ router.patch("/:leadId/outreach/:item", async (req, res) => {
     return res.status(400).json({ error: "content is required" });
   }
 
-  const { data: lead, error: leadError } = await supabase
+  // Reading through the caller's own RLS-scoped client both fetches the
+  // lead AND doubles as the ownership check — a lead belonging to another
+  // user comes back empty (not a leaked "yes it exists, but no") exactly
+  // like a genuinely missing lead would, per migration 0006's policies.
+  const { data: lead, error: leadError } = await req.supabaseUser!
     .from("leads")
     .select("*")
     .eq("id", leadId)
@@ -43,7 +49,7 @@ router.patch("/:leadId/outreach/:item", async (req, res) => {
 
   const nextOutreach = setOutreachContent(lead.outreach, item, content, provenance, note);
 
-  const { data: updated, error: updateError } = await supabase
+  const { data: updated, error: updateError } = await req.supabaseUser!
     .from("leads")
     .update({ outreach: nextOutreach, updated_at: new Date().toISOString() })
     .eq("id", leadId)
@@ -63,6 +69,24 @@ router.post("/:leadId/outreach/:item/regenerate", async (req, res) => {
 
   if (!isOutreachItem(item)) {
     return res.status(400).json({ error: `item must be one of ${OUTREACH_ITEMS.join(", ")}` });
+  }
+
+  // regenerateOutreachItem/checkRegenerateBudget below read and write via
+  // the service-role client internally (see src/lib/regenerateOutreach.ts)
+  // since they're plain library functions with no request context — this
+  // ownership check is what actually gates a stranger from spending your
+  // regenerate budget or reading your lead's evidence via this route.
+  const { data: lead, error: leadError } = await req.supabaseUser!
+    .from("leads")
+    .select("id")
+    .eq("id", leadId)
+    .maybeSingle();
+
+  if (leadError) {
+    return res.status(500).json({ error: leadError.message });
+  }
+  if (!lead) {
+    return res.status(404).json({ error: "Lead not found" });
   }
 
   const budget = await checkRegenerateBudget(leadId);
