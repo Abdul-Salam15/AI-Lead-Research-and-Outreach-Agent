@@ -44,8 +44,13 @@ services:
       # and (client-side) the password-reset redirect origin.
       - key: APP_BASE_URL
         sync: false
+      # Acts as a ceiling on top of run.max_candidates (see routes/runs.ts),
+      # not the default scrape budget itself — 60 comfortably covers a
+      # typical requested target up to ~20 qualified leads (3x = 60
+      # candidates) fully scrapable, while still bounding worst-case
+      # Firecrawl spend for an unusually large request.
       - key: MAX_SCRAPES
-        value: "20"
+        value: "60"
       - key: MAX_TURNS
         value: "40"
       - key: MAX_BUDGET_USD

@@ -10,6 +10,12 @@ router.use(requireAuth);
 // they want (e.g. "Find 10 US B2B SaaS companies..."). Anchored to the
 // start of the string so a number appearing later in the sentence (e.g.
 // "10-100 employees") is never mistaken for the target count.
+//
+// public/app.js's objectiveTargetQualifiedLeads() mirrors this exact regex
+// and bounds check to preview the count client-side (no build step in this
+// app to share a module between browser and server) — keep both in sync if
+// this ever changes, or the intake hint will show a number the server
+// doesn't actually use.
 const LEADING_FIND_COUNT = /^\s*find\s+(\d{1,3})\b/i;
 
 function extractTargetQualifiedLeads(objective: string): number | null {
@@ -39,12 +45,23 @@ router.post("/", async (req, res) => {
   // since not every discovered company will end up qualifying.
   const resolvedMaxCandidates = resolvedTargetQualifiedLeads * 3;
 
+  // Every discovered candidate needs a scrape to actually be evaluated —
+  // a flat default here regardless of resolvedMaxCandidates meant a run
+  // could out-discover its own scrape budget (observed: target=9 ->
+  // max_candidates=27, but MAX_SCRAPES defaulted to a flat 20, so even a
+  // fully successful discovery phase could never get more than 20
+  // candidates scraped and qualified). MAX_SCRAPES, if a deployer sets it
+  // explicitly, still acts as a hard ceiling on top of that — e.g. to cap
+  // real Firecrawl spend for an unusually large requested target — it's
+  // just no longer the default itself.
+  const resolvedMaxScrapes = Math.min(resolvedMaxCandidates, Number(process.env.MAX_SCRAPES ?? resolvedMaxCandidates));
+
   const { data: run, error } = await req.supabaseUser!
     .from("runs")
     .insert({
       objective,
       max_candidates: resolvedMaxCandidates,
-      max_scrapes: Number(process.env.MAX_SCRAPES ?? 20),
+      max_scrapes: resolvedMaxScrapes,
       max_turns: Number(process.env.MAX_TURNS ?? 40),
       target_qualified_leads: resolvedTargetQualifiedLeads,
       user_id: req.user!.id,

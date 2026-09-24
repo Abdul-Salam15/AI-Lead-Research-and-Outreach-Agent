@@ -397,6 +397,11 @@
   // Intake
   // ---------------------------------------------------------------------
 
+  // Preview only — the server (src/routes/runs.ts's extractTargetQualifiedLeads)
+  // is what actually decides the run's real target; this just mirrors that
+  // same regex so the hint text shown here doesn't lie about it. No shared
+  // module between browser and server in this no-build-step app, so if this
+  // regex/bounds ever change, change extractTargetQualifiedLeads to match.
   function objectiveTargetQualifiedLeads(objective) {
     const match = (objective || "").match(/^\s*find\s+(\d{1,3})\b/i);
     if (!match) return null;

@@ -49,19 +49,29 @@ function fitDiscoverResponseBudget(items: DiscoveredCompany[]): { visible: Disco
   return { visible, omitted: items.length - visible.length };
 }
 
-// Ceiling on the number of discover_companies *calls* per run — each call
-// is a real, separately-billed Apify actor run regardless of how many
-// results it returns, so this bounds worst-case discovery spend
-// independent of perCallCandidateLimit (which can be as low as 1 early in
-// self-calibration — see src/lib/apify.ts). A flat 8 used to be applied
-// no matter how small perCallCandidateLimit was: right after a calibration
-// reset (limit=1), 8 calls could only ever surface 8 companies, stranding
-// runs far short of maxCandidates (e.g. 8/30) before qualification even
-// started. Scaling the call ceiling to how many calls it actually takes to
-// reach maxCandidates at the current per-call size fixes that, while
-// ABSOLUTE_MAX_DISCOVERY_CALLS still bounds worst-case spend if
-// maxCandidates is large and perCallCandidateLimit is tiny.
-const MIN_DISCOVERY_CALLS = 8;
+// Ceiling on the number of discover_companies *calls* per run. Originally
+// sized purely to bound worst-case $ spend — each call is a real,
+// separately-billed Apify actor run regardless of how many results it
+// returns, so more calls used to directly mean more risk, independent of
+// perCallCandidateLimit (which can be as low as 1 early in
+// self-calibration — see src/lib/apify.ts).
+//
+// That's no longer the only cost backstop: discoverySpendUsedUsd/
+// MAX_DISCOVERY_SPEND_PER_RUN_USD (see the check below) now caps real $
+// spend directly, and real observed pricing is roughly $0.0001/result —
+// a run's entire discovery spend typically comes to fractions of a cent,
+// nowhere near that ceiling. So this floor can afford to be generous
+// about *call count* specifically, which matters more now than it used
+// to: passing `industries` (see discover_companies below) makes every
+// search meaningfully stricter (keyword AND location AND size AND real
+// LinkedIn industry), so each call now yields fewer new companies than
+// perCallCandidateLimit alone would suggest — a real observed run made
+// 8 calls, hit this floor, and stopped at 20 discovered companies despite
+// a 27-candidate budget, never having exhausted its actual candidate
+// pool. Raising the floor gives the agent room to try more query angles
+// before giving up, while ABSOLUTE_MAX_DISCOVERY_CALLS remains as an
+// outer sanity ceiling regardless of budget or calibration.
+const MIN_DISCOVERY_CALLS = 20;
 const ABSOLUTE_MAX_DISCOVERY_CALLS = 40;
 
 function computeMaxDiscoveryCalls(maxCandidates: number, perCallCandidateLimit: number): number {
