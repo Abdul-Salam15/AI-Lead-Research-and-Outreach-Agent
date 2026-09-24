@@ -255,28 +255,34 @@
         throw new Error("Server is missing Supabase config (check /api/config and .env)");
       }
       appConfig = config;
+      // Implicit flow, not PKCE: PKCE ties the reset link to a secret
+      // stored only in the browser that called resetPasswordForEmail, so
+      // requesting a reset on a PC and opening the emailed link on a phone
+      // (a completely normal thing for a real person to do) fails with
+      // "Auth Session missing" every time, regardless of how fast you
+      // click it — it's not a timing issue, the secret simply never
+      // existed on the second device. Implicit flow's tokens are
+      // self-contained in the link itself, so any device can complete it.
       sb = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey, {
-        auth: { flowType: "pkce" },
+        auth: { flowType: "implicit" },
       });
 
-      // Password-recovery landing: resetPasswordForEmail redirects here with
-      // ?code=...&type=recovery (query, not hash — the hash is this app's
-      // own router). Exchange it for a session, then hand off to the router.
-      const query = new URLSearchParams(location.search);
-      if (query.get("code") && query.get("type") === "recovery") {
-        await sb.auth.exchangeCodeForSession(window.location.href);
-        history.replaceState(null, "", location.pathname + location.hash);
-        navigate("#/reset-password");
-      }
+      // Registered BEFORE getSession() so it can observe supabase-js's own
+      // initial hash-token detection (it awaits the same internal init
+      // that getSession() below waits on). PASSWORD_RECOVERY fires
+      // regardless of the exact token shape in the URL, so this is what
+      // actually routes to the reset-password screen — and navigate()
+      // here also overwrites location.hash, clearing the raw token out of
+      // the visible URL in the same step.
+      sb.auth.onAuthStateChange((event, session) => {
+        state.session = session;
+        renderAccountBar();
+        if (event === "PASSWORD_RECOVERY") navigate("#/reset-password");
+      });
 
       const { data } = await sb.auth.getSession();
       state.session = data.session;
       renderAccountBar();
-
-      sb.auth.onAuthStateChange((_event, session) => {
-        state.session = session;
-        renderAccountBar();
-      });
     } catch (err) {
       console.error("initAuth failed — sign-in/sign-up will not work until this is fixed:", err);
       authInitError = "Couldn't reach the sign-in service. Try refreshing the page — if that doesn't help, the server may need a restart.";
@@ -366,7 +372,7 @@
   function renderForgotPassword(app) {
     app.innerHTML = authView({
       title: "Reset your password",
-      lede: "Enter the email on your account. We'll send a link that sets a new password; it works once and expires after 30 minutes.",
+      lede: "Enter the email on your account. We'll send a link that sets a new password; it works once and expires after 10 minutes.",
       backLink: { href: "#/login", label: "Back to sign in" },
       cardBody: `
         <div class="field"><label class="field__label" for="auth-email">Email</label><input class="input" type="email" id="auth-email" placeholder="you@example.com" autocomplete="email"></div>
@@ -1181,8 +1187,10 @@
       const originalLabel = el.textContent;
       el.disabled = true; el.textContent = "Sending…";
       try {
+        // Implicit flow appends its own #access_token=...&type=recovery
+        // fragment to whatever URL we give it — no query trick needed.
         const { error } = await sb.auth.resetPasswordForEmail(email, {
-          redirectTo: window.location.origin + "/?type=recovery",
+          redirectTo: window.location.origin + "/",
         });
         if (error) { errorEl.textContent = error.message; return; }
         infoEl.textContent = "Check your email for a reset link.";
