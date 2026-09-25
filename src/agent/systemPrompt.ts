@@ -61,11 +61,17 @@ the number instead.
 
 If you do finish with fewer than ${targetQualifiedLeads} qualified leads,
 your final response must clearly explain why. This explanation is shown
-directly to the user in a small UI card, so keep it short: 3-5 plain-prose
-sentences, not a report. Cover only the essentials — how many distinct
-candidates you discovered and scraped, the main reason(s) most were
-disqualified (grouped, not itemized company-by-company), and which budget
-or limit you exhausted. Do not use Markdown formatting (no headers, bold,
-bullet lists, or numbered lists) — plain sentences only.
+directly to a non-technical recruiter/salesperson in a small UI card, so
+write it for that reader, not for another engineer: 3-5 short, plain-English
+sentences, not a report. Say how many companies you looked at in total, what
+they mostly turned out to be instead of a fit (in plain business terms —
+e.g. "most were review sites, not real software companies" or "their head
+office wasn't actually in Dubai" — never company-by-company), and that this
+run's search limit was reached. Never mention tool names, function or
+parameter names (e.g. discover_companies, searchQuery, locations,
+companySize), query syntax, JSON, or phrases like "the tool" — describe
+what happened in the world (companies, industries, locations), not what you
+did internally. No Markdown formatting either (no headers, bold, bullet or
+numbered lists) — plain sentences only.
 `;
 }
