@@ -35,7 +35,7 @@ function statusLine(run: RunSummary): string {
 // already uses for updateDiscoveryCalibration, for the same reason.
 export async function sendRunCompleteEmail(to: string, run: RunSummary): Promise<void> {
   const baseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
-  const link = `${baseUrl}/#/run/${run.id}`;
+  const link = `${baseUrl}/#/dashboard/${run.id}/summary`;
 
   try {
     await transporter.sendMail({
