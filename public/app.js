@@ -11,6 +11,20 @@
     ));
   }
 
+  // The agent's final-turn text (run.summary) is freeform Markdown — this
+  // app has no Markdown renderer, so left as-is it shows literal "##" and
+  // "**" to the user (see the shortfall banners below). Not an exhaustive
+  // parser, just enough to strip the syntax the model actually reaches for
+  // (headers, bold, inline code) so it reads as plain prose.
+  function stripMarkdown(text) {
+    return String(text ?? "")
+      .replace(/^#{1,6}\s+/gm, "")
+      .replace(/\*\*(.*?)\*\*/g, "$1")
+      .replace(/__(.*?)__/g, "$1")
+      .replace(/`([^`]*)`/g, "$1")
+      .trim();
+  }
+
   // Scraped/agent-derived URLs are untrusted content — only render as a
   // clickable link when the scheme is actually http(s).
   function safeHref(url) {
@@ -788,12 +802,12 @@
       const short = run.leads_qualified < run.target_qualified_leads;
       const headline = run.status === "partial" ? "Run finished with fewer leads than targeted." : "Run completed.";
       return `
-        <div class="card" style="border-color:#A9C0B2; background:#F1F5F2; display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom: 20px;">
-          <span style="font-size: 14px; color:#2C5342;">
-            ${headline}
-            ${short && run.summary ? `<br><span style="color:#4C5158;">${esc(run.summary)}</span>` : ""}
-          </span>
-          <button type="button" class="btn btn--primary btn--sm" data-action="view-leads" data-run="${esc(run.id)}">View leads</button>
+        <div class="card" style="border-color:#A9C0B2; background:#F1F5F2; margin-bottom: 20px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:16px;">
+            <span style="font-size: 14px; color:#2C5342;">${headline}</span>
+            <button type="button" class="btn btn--primary btn--sm" data-action="view-leads" data-run="${esc(run.id)}">View leads</button>
+          </div>
+          ${short && run.summary ? `<p style="margin:12px 0 0; font-size:13.5px; line-height:1.6; color:#4C5158; white-space:pre-wrap;">${esc(stripMarkdown(run.summary))}</p>` : ""}
         </div>
       `;
     }
@@ -978,7 +992,7 @@
         <div class="shortfall-banner">
           <div>
             <div style="font-family:Fraunces,serif;font-weight:600;font-size:16.5px;margin-bottom:5px;">${run.leads_qualified} qualified of ${run.target_qualified_leads} requested</div>
-            <div style="font-size:14px;color:#4C5158;">${run.summary ? esc(run.summary) : "The run finished without reaching the target. Review the leads below, or start a new run with a wider objective."}</div>
+            <div style="font-size:14px;color:#4C5158;line-height:1.6;white-space:pre-wrap;">${run.summary ? esc(stripMarkdown(run.summary)) : "The run finished without reaching the target. Review the leads below, or start a new run with a wider objective."}</div>
           </div>
         </div>
       ` : ""}
