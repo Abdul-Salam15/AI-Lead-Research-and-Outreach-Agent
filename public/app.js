@@ -207,6 +207,7 @@
     auditToolFilter: "all",
     auditStatusFilter: "all",
     pollTimer: null,
+    icpDrafts: {}, // runId -> editable copy of icp_criteria, while awaiting_confirmation
   };
 
   function stopPolling() {
@@ -221,6 +222,17 @@
       state.outreachUi[key] = { mode: "view", draft: null, guidance: "", proposed: null, errorMessage: "" };
     }
     return state.outreachUi[key];
+  }
+
+  // Deep-cloned once per run from the last-fetched icp_criteria, then edited
+  // in place client-side until confirm-icp is submitted (or the tab is
+  // reloaded) — nothing here is persisted until the user clicks confirm.
+  function getIcpDraft(runId) {
+    if (!state.icpDrafts[runId]) {
+      const run = state.runCache[runId];
+      state.icpDrafts[runId] = JSON.parse(JSON.stringify((run && run.icp_criteria) || {}));
+    }
+    return state.icpDrafts[runId];
   }
 
   // ---------------------------------------------------------------------
@@ -497,6 +509,7 @@
               <span class="muted" style="font-size: 13px;">Typical run: 7–15 minutes</span>
             </div>
             <div id="intake-error" class="muted" style="color: #6F3B36; font-size: 13.5px; margin-top: 10px;"></div>
+            <div id="similar-matches" style="margin-top: 14px;"></div>
           </div>
           <div class="hero-stage" aria-hidden="true">
             <div class="hero-fan">
@@ -525,12 +538,55 @@
     `;
   }
 
-  async function startResearch() {
+  // Renders the "a similar search already exists" warning on the intake
+  // screen — each match links to that run via the same open-run action the
+  // history table uses, and "Start a new run anyway" re-calls startResearch
+  // with force=true to skip the check and create the run for real.
+  function similarMatchesBanner(matches) {
+    const headline = matches[0].identical
+      ? "An identical search already exists."
+      : "A similar search already exists.";
+    return `
+      <div class="card" style="border-color:#D8C89A; background:#F3EFE6;">
+        <div style="font-size:14px; color:#6E5518; margin-bottom:12px;">${headline} Check it out below, or start a new run anyway.</div>
+        <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:14px;">
+          ${matches.map((m) => `
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; background:#FFFFFF; border:1px solid #DAD5C6; border-radius:3px; padding:10px 12px;">
+              <div style="min-width:0;">
+                <div style="font-size:13.5px; color:#21252B; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(m.objective)}</div>
+                <div class="muted" style="font-size:12px; margin-top:2px;">${fmtDateTime(m.created_at)} · ${esc(m.status)} · ${m.leads_qualified}/${m.target_qualified_leads} leads qualified</div>
+              </div>
+              <button type="button" class="btn btn--secondary btn--sm" data-action="open-run" data-run="${esc(m.id)}" data-status="${esc(m.status)}">View</button>
+            </div>
+          `).join("")}
+        </div>
+        <button type="button" class="btn btn--primary btn--sm" data-action="start-research-anyway">Start a new run anyway</button>
+      </div>
+    `;
+  }
+
+  async function startResearch(force) {
     const textarea = document.getElementById("objective");
     const objective = (textarea.value || "").trim();
     const errorEl = document.getElementById("intake-error");
+    const similarEl = document.getElementById("similar-matches");
     errorEl.textContent = "";
+    if (similarEl) similarEl.innerHTML = "";
     if (!objective) { errorEl.textContent = "Write a research objective first."; return; }
+
+    if (!force) {
+      try {
+        const { matches } = await api(`/api/runs/similar?objective=${encodeURIComponent(objective)}`);
+        if (matches && matches.length > 0) {
+          if (similarEl) similarEl.innerHTML = similarMatchesBanner(matches);
+          return;
+        }
+      } catch (err) {
+        // Non-fatal — a failed duplicate check should never block starting
+        // real research, so fall through to creating the run as normal.
+      }
+    }
+
     try {
       const result = await api("/api/runs", {
         method: "POST",
@@ -543,9 +599,11 @@
   }
 
   // ---------------------------------------------------------------------
-  // Run (ICP confirmation + live progress — merged, since the backend
-  // starts research immediately on POST /api/runs with no separate
-  // approval gate; both are just facets of the same polled run record)
+  // Run (ICP confirmation + live progress — merged into one polled view,
+  // since they're just two states of the same run record. The backend
+  // pauses after ICP refinement at status "awaiting_confirmation" — see
+  // icpConfirmPanel below — and only starts company discovery once
+  // POST /api/runs/:id/confirm-icp is called.)
   // ---------------------------------------------------------------------
 
   function icpPanel(run) {
@@ -598,6 +656,98 @@
     `;
   }
 
+  function icpEditableInput(runId, field, label, value) {
+    return `
+      <div class="field">
+        <label class="field__label">${esc(label)}</label>
+        <input class="input" data-action="icp-text-field" data-run="${esc(runId)}" data-field="${field}" value="${esc(value || "")}">
+      </div>
+    `;
+  }
+
+  function icpEditableTextarea(runId, field, label, value) {
+    return `
+      <div class="field">
+        <label class="field__label">${esc(label)}</label>
+        <textarea class="textarea" rows="3" data-action="icp-text-field" data-run="${esc(runId)}" data-field="${field}">${esc(value || "")}</textarea>
+      </div>
+    `;
+  }
+
+  // A list of freeform strings (industries, geography, hard_filters,
+  // soft_preferences, disqualifiers) the user can edit in place, remove
+  // individual entries from, or append new (initially blank) entries to.
+  // `label` is optional — pass "" when a heading already labels the field.
+  function icpEditableList(runId, field, label, items) {
+    return `
+      <div class="icp-edit-list">
+        ${label ? `<div class="field__label">${esc(label)}</div>` : ""}
+        ${items.map((val, i) => `
+          <div class="icp-edit-row">
+            <input class="input" data-action="icp-list-item" data-run="${esc(runId)}" data-field="${field}" data-index="${i}" value="${esc(val)}">
+            <button type="button" class="btn--icon" data-action="icp-list-remove" data-run="${esc(runId)}" data-field="${field}" data-index="${i}" aria-label="Remove">✕</button>
+          </div>
+        `).join("")}
+        <button type="button" class="btn btn--ghost btn--sm" data-action="icp-list-add" data-run="${esc(runId)}" data-field="${field}">+ Add</button>
+      </div>
+    `;
+  }
+
+  // Shown instead of icpPanel while run.status === "awaiting_confirmation" —
+  // the agent has refined the ICP and stopped; nothing else happens until
+  // the user reviews it here and clicks confirm (POST .../confirm-icp),
+  // which is what actually kicks off company discovery.
+  function icpConfirmPanel(run) {
+    const icp = getIcpDraft(run.id);
+    return `
+      <div class="card card--flush">
+        <div class="icp-objective">
+          <div class="icp-fact__label">Objective as submitted</div>
+          <div style="font-size: 15.5px; line-height: 1.55;">${esc(run.objective)}</div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px; border-color:#D8C89A; background:#F3EFE6;">
+        <span style="font-size: 14px; color:#6E5518;">Review the ICP the agent derived from your objective. Edit, add, or remove anything below, then confirm to start company search.</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px;">
+        ${icpEditableInput(run.id, "target_company_type", "Target company type", icp.target_company_type)}
+        ${icpEditableInput(run.id, "headcount_range", "Headcount", icp.headcount_range)}
+      </div>
+      ${icpEditableInput(run.id, "buyer_persona", "Buyer persona", icp.buyer_persona)}
+      ${icpEditableTextarea(run.id, "business_problem", "Business problem", icp.business_problem)}
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 4px;">
+        <div class="card">${icpEditableList(run.id, "industries", "Industries", icp.industries || [])}</div>
+        <div class="card">${icpEditableList(run.id, "geography", "Geography", icp.geography || [])}</div>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px;">
+        <div class="icp-filter-panel icp-filter-panel--hard">
+          <div class="h2" style="margin-bottom: 12px; font-size: 17px;">Hard filters <span class="muted" style="font-size: 12.5px; font-weight: 400;">non-negotiable</span></div>
+          ${icpEditableList(run.id, "hard_filters", "", icp.hard_filters || [])}
+        </div>
+        <div class="icp-filter-panel icp-filter-panel--soft">
+          <div class="h2" style="margin-bottom: 12px; font-size: 17px; color:#4C5158;">Soft preferences <span class="muted" style="font-size: 12.5px;">scored, not required</span></div>
+          ${icpEditableList(run.id, "soft_preferences", "", icp.soft_preferences || [])}
+        </div>
+      </div>
+      <div class="card" style="margin-top: 16px;">
+        <div class="h2" style="margin: 0 0 10px;">Disqualifiers</div>
+        ${icpEditableList(run.id, "disqualifiers", "", icp.disqualifiers || [])}
+      </div>
+      ${icp.assumptions_made && icp.assumptions_made.length ? `
+        <div class="card" style="margin-top: 16px;">
+          <div class="h2" style="font-size: 15px;">Assumptions the agent made</div>
+          <ul style="margin: 0; padding-left: 18px; font-size: 13.5px; line-height: 1.6; color: #4C5158;">
+            ${icp.assumptions_made.map((a) => `<li>${esc(a)}</li>`).join("")}
+          </ul>
+        </div>
+      ` : ""}
+      <div style="display:flex; justify-content:flex-end; align-items:center; gap:14px; margin-top:20px;">
+        <span id="confirm-icp-error" class="muted" style="color:#6F3B36; font-size:13.5px;"></span>
+        <button type="button" class="btn btn--primary" data-action="confirm-icp" data-run="${esc(run.id)}">Confirm and start search</button>
+      </div>
+    `;
+  }
+
   function toneForStatus(status) { return status === "error" ? "tone-bad" : status === "blocked" ? "tone-warn" : "tone-ok"; }
 
   function feedPanel(toolCalls) {
@@ -635,9 +785,14 @@
 
   function runStatusBanner(run) {
     if (run.status === "completed" || run.status === "partial") {
+      const short = run.leads_qualified < run.target_qualified_leads;
+      const headline = run.status === "partial" ? "Run finished with fewer leads than targeted." : "Run completed.";
       return `
         <div class="card" style="border-color:#A9C0B2; background:#F1F5F2; display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom: 20px;">
-          <span style="font-size: 14px; color:#2C5342;">${run.status === "partial" ? "Run finished with fewer leads than targeted." : "Run completed."}</span>
+          <span style="font-size: 14px; color:#2C5342;">
+            ${headline}
+            ${short && run.summary ? `<br><span style="color:#4C5158;">${esc(run.summary)}</span>` : ""}
+          </span>
           <button type="button" class="btn btn--primary btn--sm" data-action="view-leads" data-run="${esc(run.id)}">View leads</button>
         </div>
       `;
@@ -661,6 +816,42 @@
     return "";
   }
 
+  // Repaints the run view purely from cached state (state.runCache /
+  // state.toolCallsCache) — no fetch. Used both by renderRun's poll loop
+  // (after a fresh fetch) and by the ICP-edit handlers below, which need to
+  // re-render immediately after a local-only edit (add/remove a filter row)
+  // without waiting on or triggering a network round trip.
+  function paintRun(app, runId) {
+    const run = state.runCache[runId];
+    if (!run) return;
+    const toolCalls = state.toolCallsCache[runId] || [];
+    const awaitingConfirmation = run.status === "awaiting_confirmation";
+
+    app.innerHTML = `
+      <div class="view">
+        <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 24px;">
+          <div style="max-width: 62ch;">
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+              ${run.status === "running" ? `<span class="status-dot"></span><span style="font-size:13px;color:#4C5158;">Run in progress</span>` : ""}
+              ${awaitingConfirmation ? `<span style="font-size:13px;color:#6E5518;">Waiting for your review</span>` : ""}
+            </div>
+            <h1 class="h1" style="font-size: 28px; margin: 0;">${esc(run.objective)}</h1>
+          </div>
+          ${run.status === "running" ? `<button type="button" class="btn btn--danger-outline" data-action="stop-run" data-run="${esc(run.id)}">Stop run</button>` : ""}
+        </div>
+        <div id="stop-run-error" class="muted" style="color:#6F3B36;font-size:13.5px;margin-bottom:12px;"></div>
+        ${runStatusBanner(run)}
+        ${awaitingConfirmation ? icpConfirmPanel(run) : icpPanel(run)}
+        ${awaitingConfirmation ? "" : `
+          <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 16px; align-items: start; margin-top: 16px;">
+            ${countersPanel(run)}
+            ${feedPanel(toolCalls)}
+          </div>
+        `}
+      </div>
+    `;
+  }
+
   async function renderRun(app, runId) {
     app.innerHTML = `<div class="view"><div class="muted">Loading run…</div></div>`;
 
@@ -677,28 +868,7 @@
       }
       state.runCache[runId] = run;
       state.toolCallsCache[runId] = toolCalls;
-
-      app.innerHTML = `
-        <div class="view">
-          <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 24px;">
-            <div style="max-width: 62ch;">
-              <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-                ${run.status === "running" ? `<span class="status-dot"></span><span style="font-size:13px;color:#4C5158;">Run in progress</span>` : ""}
-              </div>
-              <h1 class="h1" style="font-size: 28px; margin: 0;">${esc(run.objective)}</h1>
-            </div>
-            ${run.status === "running" ? `<button type="button" class="btn btn--danger-outline" data-action="stop-run" data-run="${esc(run.id)}">Stop run</button>` : ""}
-          </div>
-          <div id="stop-run-error" class="muted" style="color:#6F3B36;font-size:13.5px;margin-bottom:12px;"></div>
-          ${runStatusBanner(run)}
-          ${icpPanel(run)}
-          <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 16px; align-items: start; margin-top: 16px;">
-            ${countersPanel(run)}
-            ${feedPanel(toolCalls)}
-          </div>
-        </div>
-      `;
-
+      paintRun(app, runId);
       if (run.status !== "running") stopPolling();
     }
 
@@ -720,6 +890,9 @@
   // progress; the live tool-call feed isn't repeated here since the Audit
   // log tab already covers that in full, unabridged.
   function summaryTab(run) {
+    if (run.status === "awaiting_confirmation") {
+      return `${runStatusBanner(run)}${icpConfirmPanel(run)}`;
+    }
     return `
       ${runStatusBanner(run)}
       ${icpPanel(run)}
@@ -805,7 +978,7 @@
         <div class="shortfall-banner">
           <div>
             <div style="font-family:Fraunces,serif;font-weight:600;font-size:16.5px;margin-bottom:5px;">${run.leads_qualified} qualified of ${run.target_qualified_leads} requested</div>
-            <div style="font-size:14px;color:#4C5158;">The run finished without reaching the target. Review the leads below, or start a new run with a wider objective.</div>
+            <div style="font-size:14px;color:#4C5158;">${run.summary ? esc(run.summary) : "The run finished without reaching the target. Review the leads below, or start a new run with a wider objective."}</div>
           </div>
         </div>
       ` : ""}
@@ -1320,7 +1493,8 @@
       return;
     }
 
-    if (action === "start-research") return startResearch();
+    if (action === "start-research") return startResearch(false);
+    if (action === "start-research-anyway") return startResearch(true);
     if (action === "go-intake") return navigate("#/intake");
     if (action === "view-leads") return navigate(`#/dashboard/${runId}/leads`);
     if (action === "export-leads-csv") {
@@ -1356,7 +1530,48 @@
       }
       return render();
     }
-    if (action === "open-run") return navigate(el.dataset.status === "running" ? `#/run/${runId}` : `#/dashboard/${runId}/leads`);
+    if (action === "icp-list-add") {
+      const draft = getIcpDraft(runId);
+      draft[el.dataset.field] = [...(draft[el.dataset.field] || []), ""];
+      return paintRun(document.getElementById("app"), runId);
+    }
+    if (action === "icp-list-remove") {
+      const draft = getIcpDraft(runId);
+      const idx = Number(el.dataset.index);
+      draft[el.dataset.field] = (draft[el.dataset.field] || []).filter((_, i) => i !== idx);
+      return paintRun(document.getElementById("app"), runId);
+    }
+    if (action === "confirm-icp") {
+      const draft = getIcpDraft(runId);
+      // Blank rows (an "+ Add" the user never filled in, or a field that
+      // was empty to start with) are dropped rather than sent through —
+      // the agent's own save_icp schema expects real strings, not "".
+      const cleaned = { ...draft };
+      for (const field of ["industries", "geography", "hard_filters", "soft_preferences", "disqualifiers"]) {
+        cleaned[field] = (cleaned[field] || []).map((s) => (s || "").trim()).filter(Boolean);
+      }
+      const errorEl = document.getElementById("confirm-icp-error");
+      if (errorEl) errorEl.textContent = "";
+      el.disabled = true;
+      el.textContent = "Starting search…";
+      try {
+        await api(`/api/runs/${runId}/confirm-icp`, {
+          method: "POST",
+          body: JSON.stringify({ icp_criteria: cleaned }),
+        });
+        delete state.icpDrafts[runId];
+        return render(); // same hash as now — re-dispatches to pick up status: "running" and resume polling
+      } catch (err) {
+        if (errorEl) errorEl.textContent = `Couldn't confirm: ${err.message}`;
+        el.disabled = false;
+        el.textContent = "Confirm and start search";
+      }
+      return;
+    }
+    if (action === "open-run") {
+      const live = el.dataset.status === "running" || el.dataset.status === "awaiting_confirmation";
+      return navigate(live ? `#/run/${runId}` : `#/dashboard/${runId}/leads`);
+    }
     if (action === "dash-tab") { state.dashboardTab[runId] = el.dataset.value; return navigate(`#/dashboard/${runId}/${el.dataset.value}`); }
     if (action === "open-lead") { const rid = parseHash().params.runId; return navigate(`#/lead/${rid}/${leadId}`); }
     if (action === "back-to-leads") return navigate(`#/dashboard/${runId}/leads`);
@@ -1470,6 +1685,14 @@
     if (action === "draft-body") { getUi(el.dataset.lead, el.dataset.item).draft.body = el.value; return; }
     if (action === "draft-note") { getUi(el.dataset.lead, el.dataset.item).draft.note = el.value; return; }
     if (action === "regen-guidance") { getUi(el.dataset.lead, el.dataset.item).guidance = el.value; return; }
+    if (action === "icp-text-field") { getIcpDraft(el.dataset.run)[el.dataset.field] = el.value; return; }
+    if (action === "icp-list-item") {
+      const draft = getIcpDraft(el.dataset.run);
+      const arr = draft[el.dataset.field] || [];
+      arr[Number(el.dataset.index)] = el.value;
+      draft[el.dataset.field] = arr;
+      return;
+    }
     if (action === "password-strength") {
       const score = passwordStrength(el.value);
       const segs = el.parentElement.parentElement.querySelectorAll(".pw-strength-seg");

@@ -76,3 +76,45 @@ export async function notifyRunOwner(run: RunSummary): Promise<void> {
     console.error(`notifyRunOwner failed for run ${run.id}:`, err);
   }
 }
+
+// Fire-and-forget, same reasoning as sendRunCompleteEmail — a run reaching
+// "awaiting_confirmation" isn't a terminal state, but it is a state the
+// owner has no other way to find out about: the agent has stopped and is
+// waiting on them, with no further progress until they review and confirm
+// the ICP it saved.
+export async function sendIcpReviewEmail(to: string, run: RunSummary): Promise<void> {
+  const baseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
+  const link = `${baseUrl}/#/run/${run.id}`;
+
+  try {
+    await transporter.sendMail({
+      from: process.env.GMAIL_USER,
+      to,
+      subject: `Casefile: review ICP before search starts — "${run.objective.slice(0, 60)}"`,
+      text: [
+        `Casefile has refined your qualification objective into ICP criteria and is waiting for you to review it.`,
+        ``,
+        `Objective: ${run.objective}`,
+        ``,
+        `Review, edit, and confirm to start company search: ${link}`,
+      ].join("\n"),
+    });
+  } catch (err) {
+    console.error(`sendIcpReviewEmail failed for run ${run.id}:`, err);
+  }
+}
+
+export async function notifyIcpAwaitingConfirmation(run: RunSummary): Promise<void> {
+  if (!run.user_id) return;
+
+  try {
+    const { data, error } = await supabase.auth.admin.getUserById(run.user_id);
+    if (error || !data.user?.email) {
+      console.error(`notifyIcpAwaitingConfirmation: couldn't resolve email for user ${run.user_id}:`, error?.message);
+      return;
+    }
+    await sendIcpReviewEmail(data.user.email, run);
+  } catch (err) {
+    console.error(`notifyIcpAwaitingConfirmation failed for run ${run.id}:`, err);
+  }
+}

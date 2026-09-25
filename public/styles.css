@@ -254,6 +254,10 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, input:focus-visib
   border-radius: 2px; padding: 5px 9px; margin: 0 8px 8px 0;
 }
 
+.icp-edit-list { display: flex; flex-direction: column; gap: 8px; }
+.icp-edit-row { display: flex; align-items: center; gap: 6px; }
+.icp-edit-row .input { flex: 1; }
+
 /* ---------------------------------------------------------------------- *
  * Lead detail
  * ---------------------------------------------------------------------- */

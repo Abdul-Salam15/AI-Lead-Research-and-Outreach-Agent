@@ -1,6 +1,8 @@
 import { Router } from "express";
-import { runAgent, stopRun } from "../agent/runAgent";
+import { z } from "zod";
+import { runIcpPhase, runDiscoveryPhase, stopRun } from "../agent/runAgent";
 import { requireAuth } from "../middleware/requireAuth";
+import { normalizeObjective, similarityScore } from "../lib/similarity";
 
 const router = Router();
 
@@ -74,13 +76,15 @@ router.post("/", async (req, res) => {
   }
 
   // Fire-and-forget — the HTTP request returns immediately and the
-  // frontend polls GET /api/runs/:id for progress. runAgent itself reads
+  // frontend polls GET /api/runs/:id for progress. runIcpPhase itself reads
   // and writes via the service-role client internally (it has no request
   // context to scope a client to), which is fine — RLS only needs to gate
   // the user-facing routes here, not the background agent's own access to
-  // a run it was explicitly asked to process.
-  runAgent(run.id).catch((err) => {
-    console.error(`runAgent(${run.id}) failed outside its own error handling:`, err);
+  // a run it was explicitly asked to process. It only refines the ICP and
+  // stops at "awaiting_confirmation" — POST /:id/confirm-icp below is what
+  // continues the run into discovery.
+  runIcpPhase(run.id).catch((err) => {
+    console.error(`runIcpPhase(${run.id}) failed outside its own error handling:`, err);
   });
 
   res.json({ id: run.id });
@@ -99,6 +103,48 @@ router.get("/", async (req, res) => {
   res.json(data);
 });
 
+const SIMILARITY_THRESHOLD = 0.6; // same threshold the "string-similarity" library treats as a reasonable match
+const MAX_SIMILAR_MATCHES = 3;
+
+// Checked from the intake screen before a new run is created, so the user
+// can be warned "a similar search already exists" and go look at it instead
+// of unknowingly re-running (and re-paying for) the same research. Scoped
+// to the caller's own runs via req.supabaseUser (RLS) — this never compares
+// against or reveals another user's search objectives, only the caller's
+// own run history, same as every other route in this file.
+//
+// Registered before GET /:id so "/similar" isn't swallowed by that route's
+// :id param match.
+router.get("/similar", async (req, res) => {
+  const objective = typeof req.query.objective === "string" ? req.query.objective : "";
+  if (!objective.trim()) {
+    return res.json({ matches: [] });
+  }
+
+  // Capped rather than unbounded — this run's own history is what's being
+  // compared against, and a similarity pass over it should stay cheap
+  // regardless of how long that history gets.
+  const { data, error } = await req.supabaseUser!
+    .from("runs")
+    .select("id, objective, status, created_at, leads_qualified, target_qualified_leads")
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  const normalizedNew = normalizeObjective(objective);
+  const matches = (data ?? [])
+    .map((run) => ({ ...run, similarity: similarityScore(objective, run.objective) }))
+    .filter((run) => run.similarity >= SIMILARITY_THRESHOLD)
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, MAX_SIMILAR_MATCHES)
+    .map((run) => ({ ...run, identical: normalizeObjective(run.objective) === normalizedNew }));
+
+  res.json({ matches });
+});
+
 router.get("/:id", async (req, res) => {
   const { data, error } = await req.supabaseUser!
     .from("runs")
@@ -114,6 +160,74 @@ router.get("/:id", async (req, res) => {
   }
 
   res.json(data);
+});
+
+// Matches save_icp's own zod schema in src/agent/tools.ts — this is the
+// same shape, just validated again here since it's now also an
+// externally-editable payload (a human can add/remove/rewrite any of these
+// fields from the review screen before confirming).
+const icpCriteriaSchema = z.object({
+  target_company_type: z.string(),
+  industries: z.array(z.string()),
+  geography: z.array(z.string()),
+  headcount_range: z.string(),
+  buyer_persona: z.string(),
+  business_problem: z.string(),
+  hard_filters: z.array(z.string()),
+  soft_preferences: z.array(z.string()),
+  disqualifiers: z.array(z.string()),
+  assumptions_made: z.array(z.string()).optional(),
+});
+
+// Confirms (and, when the human edited it, overwrites) the ICP a run's
+// phase 1 saved, then kicks off phase 2 (discovery through outreach
+// drafting) — see runIcpPhase/runDiscoveryPhase in src/agent/runAgent.ts.
+// Only valid from "awaiting_confirmation"; the .eq("status", ...) below
+// double-checks that atomically against a race (e.g. a double-click).
+router.post("/:id/confirm-icp", async (req, res) => {
+  const parsed = icpCriteriaSchema.safeParse(req.body?.icp_criteria);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "icp_criteria is missing or invalid", details: parsed.error.flatten() });
+  }
+
+  const { data: run, error: runError } = await req.supabaseUser!
+    .from("runs")
+    .select("status")
+    .eq("id", req.params.id)
+    .maybeSingle();
+
+  if (runError) {
+    return res.status(500).json({ error: runError.message });
+  }
+  if (!run) {
+    return res.status(404).json({ error: "Run not found" });
+  }
+  if (run.status !== "awaiting_confirmation") {
+    return res.status(409).json({ error: `Run is not awaiting ICP confirmation (status: ${run.status})` });
+  }
+
+  const { data: updatedRun, error } = await req.supabaseUser!
+    .from("runs")
+    .update({ icp_criteria: parsed.data, status: "running" })
+    .eq("id", req.params.id)
+    .eq("status", "awaiting_confirmation")
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+  if (!updatedRun) {
+    return res.status(409).json({ error: "Run is no longer awaiting ICP confirmation." });
+  }
+
+  // Fire-and-forget, same pattern as the initial POST / — the frontend goes
+  // back to polling GET /api/runs/:id for progress.
+  runDiscoveryPhase(updatedRun.id).catch((err) => {
+    console.error(`runDiscoveryPhase(${updatedRun.id}) failed outside its own error handling:`, err);
+  });
+
+  res.json(updatedRun);
 });
 
 router.get("/:id/leads", async (req, res) => {

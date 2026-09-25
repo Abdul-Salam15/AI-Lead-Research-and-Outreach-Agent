@@ -35,8 +35,10 @@ qualified and saved via `save_lead`, not before.
 ## Pass standard
 
 The list should reach the target number of qualified companies for this
-run and pass the checks above. If the candidate pool doesn't produce
-enough qualified companies within the run's tool-call limits, it is
-correct to stop and report fewer leads with a clear explanation rather
-than searching further once limits are hit, and it is never correct to
-lower the qualification bar to hit the number.
+run and pass the checks above. If the first candidate pool doesn't
+produce enough qualified companies, search again — different sub-niches
+or search angles — as long as you're still within the run's discovery
+and scrape limits. Only once those limits are genuinely exhausted is it
+correct to stop and report fewer leads with a clear explanation of why
+the target wasn't reached. It is never correct to lower the
+qualification bar to hit the number.
