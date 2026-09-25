@@ -25,12 +25,11 @@
       .trim();
   }
 
-  // Safety net on top of the system prompt asking the agent for a short
-  // shortfall explanation — the prompt shapes new runs going forward, but
-  // this keeps any summary (old or new, however long the model actually
-  // wrote) from blowing up the shortfall banners. Cuts at the last sentence
-  // boundary that fits, falling back to a word boundary, so it doesn't
-  // chop off mid-word.
+  // Builds the collapsed preview of a (possibly long) shortfall summary —
+  // see summaryBlock below, which pairs this with a "Show full explanation"
+  // toggle rather than dropping the rest permanently. Cuts at the last
+  // sentence boundary that fits, falling back to a word boundary, so it
+  // doesn't chop off mid-word.
   function truncateSummary(text, maxLen) {
     if (text.length <= maxLen) return text;
     const cut = text.slice(0, maxLen);
@@ -38,6 +37,26 @@
     if (lastSentence > maxLen * 0.4) return cut.slice(0, lastSentence + 1);
     const lastSpace = cut.lastIndexOf(" ");
     return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trim() + "…";
+  }
+
+  // Renders a run's shortfall explanation (run.summary) wherever it's
+  // shown. Only a short preview is visible by default, with the rest
+  // behind "Show full explanation" — a hard truncation with no way to see
+  // the rest loses exactly the "why" a reader came here for (the actual
+  // per-company disqualification reasons tend to come later in the text),
+  // but showing the whole freeform report inline by default is illegible.
+  // state.summaryExpanded persists the toggle per run (not saved to the
+  // server — just a client-side view preference).
+  function summaryBlock(run) {
+    if (!run.summary) return "";
+    const stripped = stripMarkdown(run.summary);
+    const preview = truncateSummary(stripped, 200);
+    const expanded = !!state.summaryExpanded[run.id];
+    const hasMore = preview.length < stripped.length;
+    return `
+      <p style="margin:12px 0 0; font-size:13.5px; line-height:1.6; color:#4C5158; white-space:pre-wrap;">${esc(expanded ? stripped : preview)}</p>
+      ${hasMore ? `<button type="button" class="btn--ghost" style="font-size:13px; margin-top:6px;" data-action="toggle-summary" data-run="${esc(run.id)}">${expanded ? "Show less" : "Show full explanation"}</button>` : ""}
+    `;
   }
 
   // Scraped/agent-derived URLs are untrusted content — only render as a
@@ -237,6 +256,7 @@
     auditStatusFilter: "all",
     pollTimer: null,
     icpDrafts: {}, // runId -> editable copy of icp_criteria, while awaiting_confirmation
+    summaryExpanded: {}, // runId -> whether the shortfall explanation is shown in full
   };
 
   function stopPolling() {
@@ -822,7 +842,7 @@
             <span style="font-size: 14px; color:#2C5342;">${headline}</span>
             <button type="button" class="btn btn--primary btn--sm" data-action="view-leads" data-run="${esc(run.id)}">View leads</button>
           </div>
-          ${short && run.summary ? `<p style="margin:12px 0 0; font-size:13.5px; line-height:1.6; color:#4C5158; white-space:pre-wrap;">${esc(truncateSummary(stripMarkdown(run.summary), 420))}</p>` : ""}
+          ${short ? summaryBlock(run) : ""}
         </div>
       `;
     }
@@ -1007,7 +1027,7 @@
         <div class="shortfall-banner">
           <div>
             <div style="font-family:Fraunces,serif;font-weight:600;font-size:16.5px;margin-bottom:5px;">${run.leads_qualified} qualified of ${run.target_qualified_leads} requested</div>
-            <div style="font-size:14px;color:#4C5158;line-height:1.6;white-space:pre-wrap;">${run.summary ? esc(truncateSummary(stripMarkdown(run.summary), 420)) : "The run finished without reaching the target. Review the leads below, or start a new run with a wider objective."}</div>
+            ${run.summary ? summaryBlock(run) : `<div style="font-size:14px;color:#4C5158;">The run finished without reaching the target. Review the leads below, or start a new run with a wider objective.</div>`}
           </div>
         </div>
       ` : ""}
@@ -1526,6 +1546,10 @@
     if (action === "start-research-anyway") return startResearch(true);
     if (action === "go-intake") return navigate("#/intake");
     if (action === "view-leads") return navigate(`#/dashboard/${runId}/leads`);
+    if (action === "toggle-summary") {
+      state.summaryExpanded[runId] = !state.summaryExpanded[runId];
+      return render(); // re-dispatches to whichever view (run detail, dashboard summary/leads) is on screen
+    }
     if (action === "export-leads-csv") {
       const leads = state.leadsCache[runId] || [];
       if (leads.length === 0) return;
