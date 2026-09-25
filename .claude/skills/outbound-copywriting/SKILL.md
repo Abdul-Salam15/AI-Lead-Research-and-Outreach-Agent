@@ -37,6 +37,15 @@ Also draft a short LinkedIn message.
 - **Email 3** — keep the final follow-up brief; invite a reply if the
   timing or fit is wrong.
 
+Every email (all 3 steps) ends with the same complimentary close:
+
+```
+Best regards,
+Koya Team
+```
+
+The LinkedIn message is not a letter and is not signed this way.
+
 ## Personalization
 
 Good personalization references evidence: website positioning, product or

@@ -47,6 +47,76 @@
     return status;
   }
 
+  // RFC4180: wrap every field in quotes, double up any internal quotes —
+  // safest option regardless of whether a field happens to contain a
+  // comma, newline, or quote (drafted email bodies routinely have all three).
+  function csvField(value) {
+    const s = value === null || value === undefined ? "" : String(value);
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+
+  function leadsToCsv(leads) {
+    const headers = [
+      "Company Name", "Domain", "Status", "Confidence",
+      "Fit Reasons", "Concerns", "Source URLs", "Source Summary",
+      "Email 1 Subject", "Email 1 Body",
+      "Email 2 Subject", "Email 2 Body",
+      "Email 3 Subject", "Email 3 Body",
+      "LinkedIn Message", "Filed At",
+    ];
+    const rows = leads.map((l) => {
+      const emails = (l.outreach && l.outreach.emails) || [];
+      const email = (i) => emails[i] || {};
+      return [
+        l.company_name,
+        l.company_domain,
+        statusLabel(l.qualification_status),
+        l.confidence === null || l.confidence === undefined ? "" : Number(l.confidence).toFixed(2),
+        (l.fit_reasons || []).join("; "),
+        (l.concerns || []).join("; "),
+        (l.source_urls || []).join("; "),
+        l.source_summary,
+        email(0).subject, email(0).body,
+        email(1).subject, email(1).body,
+        email(2).subject, email(2).body,
+        l.outreach && l.outreach.linkedin_message,
+        l.created_at,
+      ].map(csvField).join(",");
+    });
+    return [headers.map(csvField).join(","), ...rows].join("\r\n");
+  }
+
+  function toolCallsToCsv(toolCalls) {
+    const headers = ["Tool", "Purpose", "Input Summary", "Result Summary", "Status", "Error Message", "Time"];
+    const rows = toolCalls.map((r) => [
+      r.tool_name,
+      r.purpose,
+      r.input_summary,
+      r.result_summary,
+      r.status,
+      r.error_message,
+      r.created_at,
+    ].map(csvField).join(","));
+    return [headers.map(csvField).join(","), ...rows].join("\r\n");
+  }
+
+  // Leads are already loaded client-side (leadsCache), so this builds and
+  // downloads the file entirely in the browser — no server round-trip,
+  // no new API route needed.
+  function downloadCsv(filename, content) {
+    // Leading BOM so Excel (which guesses encoding without one) renders
+    // non-ASCII characters in drafted copy correctly instead of mangling them.
+    const blob = new Blob(["﻿" + content], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   async function api(path, options) {
     const headers = { "Content-Type": "application/json" };
     if (state.session && state.session.access_token) {
@@ -639,8 +709,23 @@
   }
 
   // ---------------------------------------------------------------------
-  // Dashboard (Leads / Audit log tabs)
+  // Dashboard (Summary / Leads / Audit log tabs)
   // ---------------------------------------------------------------------
+
+  // The only place to see the objective/ICP breakdown and the run's
+  // counters (companies discovered, sites scraped, leads qualified, cost)
+  // once you've navigated away from the live #/run/:id page — previously
+  // clicking "View leads" from there lost access to this entirely, with no
+  // way back. Reuses the same panels renderRun shows while a run is in
+  // progress; the live tool-call feed isn't repeated here since the Audit
+  // log tab already covers that in full, unabridged.
+  function summaryTab(run) {
+    return `
+      ${runStatusBanner(run)}
+      ${icpPanel(run)}
+      <div style="margin-top: 16px;">${countersPanel(run)}</div>
+    `;
+  }
 
   function leadCard(lead) {
     const conf = lead.confidence === null || lead.confidence === undefined ? null : Number(lead.confidence);
@@ -730,22 +815,25 @@
             <button type="button" class="filter-chip ${state.leadFilter === key ? "is-active" : ""}" data-action="set-lead-filter" data-value="${key}">${label}${key === "top" ? "" : " " + (counts[key] || 0)}</button>
           `).join("")}
         </div>
-        ${state.leadFilter !== "top" ? `
-          <div class="sort-row">
-            <label for="sortpick">Sort</label>
-            <select id="sortpick" class="select" data-action="set-lead-sort">
-              <option value="conf-desc" ${state.leadSort === "conf-desc" ? "selected" : ""}>Confidence, high to low</option>
-              <option value="conf-asc" ${state.leadSort === "conf-asc" ? "selected" : ""}>Confidence, low to high</option>
-              <option value="name" ${state.leadSort === "name" ? "selected" : ""}>Company name</option>
-            </select>
-          </div>
-        ` : `<span class="muted" style="font-size:12.5px;">Ranked: qualified first, then highest-confidence review/not-qualified fill any remaining slots.</span>`}
+        <div style="display:flex;align-items:center;gap:14px;">
+          ${state.leadFilter !== "top" ? `
+            <div class="sort-row">
+              <label for="sortpick">Sort</label>
+              <select id="sortpick" class="select" data-action="set-lead-sort">
+                <option value="conf-desc" ${state.leadSort === "conf-desc" ? "selected" : ""}>Confidence, high to low</option>
+                <option value="conf-asc" ${state.leadSort === "conf-asc" ? "selected" : ""}>Confidence, low to high</option>
+                <option value="name" ${state.leadSort === "name" ? "selected" : ""}>Company name</option>
+              </select>
+            </div>
+          ` : `<span class="muted" style="font-size:12.5px;">Ranked: qualified first, then highest-confidence review/not-qualified fill any remaining slots.</span>`}
+          <button type="button" class="btn btn--ghost btn--sm" data-action="export-leads-csv" data-run="${esc(run.id)}">Export CSV</button>
+        </div>
       </div>
       <div class="leads-grid">${list.map(leadCard).join("")}</div>
     `;
   }
 
-  function auditTab(toolCalls) {
+  function auditTab(run, toolCalls) {
     if (toolCalls === null) return `<div class="muted">Loading audit log…</div>`;
     if (toolCalls.length === 0) return `<div class="muted">No tool calls recorded for this run.</div>`;
 
@@ -756,7 +844,9 @@
 
     return `
       <div class="filters-row">
-        <div></div>
+        <div>
+          <button type="button" class="btn btn--ghost btn--sm" data-action="export-toolcalls-csv" data-run="${esc(run.id)}">Export CSV</button>
+        </div>
         <div class="sort-row">
           <select class="select" data-action="set-audit-tool">
             <option value="all" ${state.auditToolFilter === "all" ? "selected" : ""}>All tools</option>
@@ -815,11 +905,12 @@
             </div>
           </div>
           <div class="tabs">
+            <button type="button" class="tab ${tab === "summary" ? "is-active" : ""}" data-action="dash-tab" data-run="${esc(runId)}" data-value="summary">Summary</button>
             <button type="button" class="tab ${tab === "leads" ? "is-active" : ""}" data-action="dash-tab" data-run="${esc(runId)}" data-value="leads">Leads</button>
             <button type="button" class="tab ${tab === "audit" ? "is-active" : ""}" data-action="dash-tab" data-run="${esc(runId)}" data-value="audit">Audit log</button>
           </div>
           <div style="padding-top: 20px;">
-            ${tab === "leads" ? leadsTab(run, leads) : auditTab(toolCalls)}
+            ${tab === "summary" ? summaryTab(run) : tab === "leads" ? leadsTab(run, leads) : auditTab(run, toolCalls)}
           </div>
         </div>
       `;
@@ -1232,6 +1323,24 @@
     if (action === "start-research") return startResearch();
     if (action === "go-intake") return navigate("#/intake");
     if (action === "view-leads") return navigate(`#/dashboard/${runId}/leads`);
+    if (action === "export-leads-csv") {
+      const leads = state.leadsCache[runId] || [];
+      if (leads.length === 0) return;
+      const run = state.runCache[runId];
+      const slug = (run && run.objective ? run.objective : "leads")
+        .slice(0, 40).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      downloadCsv(`casefile-${slug || "leads"}-${runId.slice(0, 8)}.csv`, leadsToCsv(leads));
+      return;
+    }
+    if (action === "export-toolcalls-csv") {
+      const toolCalls = state.toolCallsCache[runId] || [];
+      if (toolCalls.length === 0) return;
+      const run = state.runCache[runId];
+      const slug = (run && run.objective ? run.objective : "tool-calls")
+        .slice(0, 40).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      downloadCsv(`casefile-${slug || "tool-calls"}-${runId.slice(0, 8)}-tool-calls.csv`, toolCallsToCsv(toolCalls));
+      return;
+    }
     if (action === "stop-run") {
       if (!confirm("Stop this run? Whatever's been found so far stays saved, but research stops here.")) return;
       el.disabled = true;

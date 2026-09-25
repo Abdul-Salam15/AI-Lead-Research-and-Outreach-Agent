@@ -3,6 +3,7 @@ import { z } from "zod";
 import { supabase } from "../lib/supabase";
 import { discoverCompaniesViaApify, updateDiscoveryCalibration, DiscoveredCompany, MAX_DISCOVERY_SPEND_PER_RUN_USD } from "../lib/apify";
 import { scrapeUrl } from "../lib/scrape";
+import { ensureComplimentaryClose } from "../lib/outreachFormatting";
 
 // Hard ceiling on the size of what discover_companies hands back to the
 // model, independent of perCallCandidateLimit/calibration. Observed
@@ -398,6 +399,16 @@ export function buildToolServer(ctx: RunContext) {
         }
       }
 
+      // Every cold email ends the same way regardless of whether the model
+      // remembered to close it that way itself — enforced here rather than
+      // left purely to the outbound-copywriting skill's instructions, same
+      // reasoning as the completeness check just above. Only the 3 emails,
+      // not the LinkedIn message, which isn't a letter and isn't signed
+      // the same way.
+      const normalizedOutreach = lead.outreach?.emails
+        ? { ...lead.outreach, emails: lead.outreach.emails.map((e) => ({ ...e, body: ensureComplimentaryClose(e.body) })) }
+        : lead.outreach;
+
       const payload = {
         run_id: ctx.runId,
         company_name: lead.company_name,
@@ -408,7 +419,7 @@ export function buildToolServer(ctx: RunContext) {
         concerns: lead.concerns,
         source_urls: lead.source_urls,
         source_summary: lead.source_summary,
-        outreach: lead.outreach ?? {},
+        outreach: normalizedOutreach ?? {},
         updated_at: new Date().toISOString(),
       };
 

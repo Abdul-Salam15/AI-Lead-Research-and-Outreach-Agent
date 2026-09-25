@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { supabase } from "./supabase";
+import { ensureComplimentaryClose } from "./outreachFormatting";
 
 const anthropic = new Anthropic();
 const REGENERATE_LIMIT = Number(process.env.REGENERATE_LIMIT ?? 3);
@@ -102,6 +103,14 @@ export async function regenerateOutreachItem(leadId: string, item: string, note?
   const rawText = (block?.text ?? "{}").trim();
   const unfenced = rawText.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
   const proposed = JSON.parse(unfenced); // throws on unparseable output — see below
+
+  // Same sign-off rule as the agent's own first-pass drafts (save_lead in
+  // tools.ts) — an email regenerated through this endpoint shouldn't lose
+  // it. Only email_1/2/3 are letters that get signed this way; a
+  // regenerated LinkedIn message is left untouched.
+  if (item !== "linkedin" && proposed && typeof proposed === "object" && typeof proposed.body === "string") {
+    proposed.body = ensureComplimentaryClose(proposed.body);
+  }
 
   // IMPORTANT: this call counts against the budget whether or not the user
   // ultimately applies the result — the cost was already incurred. But it
