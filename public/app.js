@@ -25,6 +25,21 @@
       .trim();
   }
 
+  // Safety net on top of the system prompt asking the agent for a short
+  // shortfall explanation — the prompt shapes new runs going forward, but
+  // this keeps any summary (old or new, however long the model actually
+  // wrote) from blowing up the shortfall banners. Cuts at the last sentence
+  // boundary that fits, falling back to a word boundary, so it doesn't
+  // chop off mid-word.
+  function truncateSummary(text, maxLen) {
+    if (text.length <= maxLen) return text;
+    const cut = text.slice(0, maxLen);
+    const lastSentence = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf(".\n"));
+    if (lastSentence > maxLen * 0.4) return cut.slice(0, lastSentence + 1);
+    const lastSpace = cut.lastIndexOf(" ");
+    return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trim() + "…";
+  }
+
   // Scraped/agent-derived URLs are untrusted content — only render as a
   // clickable link when the scheme is actually http(s).
   function safeHref(url) {
@@ -807,7 +822,7 @@
             <span style="font-size: 14px; color:#2C5342;">${headline}</span>
             <button type="button" class="btn btn--primary btn--sm" data-action="view-leads" data-run="${esc(run.id)}">View leads</button>
           </div>
-          ${short && run.summary ? `<p style="margin:12px 0 0; font-size:13.5px; line-height:1.6; color:#4C5158; white-space:pre-wrap;">${esc(stripMarkdown(run.summary))}</p>` : ""}
+          ${short && run.summary ? `<p style="margin:12px 0 0; font-size:13.5px; line-height:1.6; color:#4C5158; white-space:pre-wrap;">${esc(truncateSummary(stripMarkdown(run.summary), 420))}</p>` : ""}
         </div>
       `;
     }
@@ -992,7 +1007,7 @@
         <div class="shortfall-banner">
           <div>
             <div style="font-family:Fraunces,serif;font-weight:600;font-size:16.5px;margin-bottom:5px;">${run.leads_qualified} qualified of ${run.target_qualified_leads} requested</div>
-            <div style="font-size:14px;color:#4C5158;line-height:1.6;white-space:pre-wrap;">${run.summary ? esc(stripMarkdown(run.summary)) : "The run finished without reaching the target. Review the leads below, or start a new run with a wider objective."}</div>
+            <div style="font-size:14px;color:#4C5158;line-height:1.6;white-space:pre-wrap;">${run.summary ? esc(truncateSummary(stripMarkdown(run.summary), 420)) : "The run finished without reaching the target. Review the leads below, or start a new run with a wider objective."}</div>
           </div>
         </div>
       ` : ""}

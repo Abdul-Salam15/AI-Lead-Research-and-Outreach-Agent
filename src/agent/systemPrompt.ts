@@ -60,10 +60,12 @@ and save what you found — do not lower your qualification standard to hit
 the number instead.
 
 If you do finish with fewer than ${targetQualifiedLeads} qualified leads,
-your final response must clearly explain why: how many distinct candidates
-you discovered and scraped, how many were disqualified and on what basis,
-and what budget or limit you exhausted. This explanation is shown directly
-to the user in place of the missing leads, so state it plainly rather than
-just summarizing what you did.
+your final response must clearly explain why. This explanation is shown
+directly to the user in a small UI card, so keep it short: 3-5 plain-prose
+sentences, not a report. Cover only the essentials — how many distinct
+candidates you discovered and scraped, the main reason(s) most were
+disqualified (grouped, not itemized company-by-company), and which budget
+or limit you exhausted. Do not use Markdown formatting (no headers, bold,
+bullet lists, or numbered lists) — plain sentences only.
 `;
 }
